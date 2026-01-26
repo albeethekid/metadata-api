@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube Metadata CSV</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; }
+    h1 { margin-bottom: 8px; }
+    textarea { width: 100%; min-height: 200px; padding: 12px; box-sizing: border-box; font-family: monospace; }
+    button { padding: 10px 16px; font-size: 14px; cursor: pointer; }
+    .row { margin: 12px 0; }
+    .status { margin-top: 8px; font-size: 14px; color: #444; }
+    #download-link { display: none; margin-top: 12px; }
+    .muted { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>YouTube Metadata CSV</h1>
+  <div class="row">
+    <label for="urls-input"><strong>YouTube URLs (one per line)</strong></label><br />
+    <textarea id="urls-input" placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ"></textarea>
+  </div>
+  <div class="row">
+    <button id="generate-btn">Generate CSV</button>
+  </div>
+  <div class="status" id="progress-text">Processed 0 of 0 valid videos</div>
+  <div class="status muted" id="skipped-text"></div>
+  <div class="status muted" id="failed-text"></div>
+  <a id="download-link" href="#" download>Download CSV</a>
+
+  <script>
+    // Use same-origin API to avoid CORS issues when served locally
+    const API_BASE = '';
+    const urlsInput = document.getElementById('urls-input');
+    const generateBtn = document.getElementById('generate-btn');
+    const progressText = document.getElementById('progress-text');
+    const skippedText = document.getElementById('skipped-text');
+    const failedText = document.getElementById('failed-text');
+    const downloadLink = document.getElementById('download-link');
+
+    function extractYouTubeVideoId(rawUrl) {
+      if (!rawUrl) return null;
+      const trimmed = rawUrl.trim();
+      if (!trimmed) return null;
+      let url;
+      try {
+        url = new URL(trimmed);
+      } catch (e) {
+        return null;
+      }
+
+      const host = url.hostname.replace(/^www\./, '').toLowerCase();
+      if (host === 'youtu.be') {
+        const id = url.pathname.split('/').filter(Boolean)[0];
+        return id || null;
+      }
+
+      if (host.endsWith('youtube.com')) {
+        // watch?v=ID
+        if (url.pathname === '/watch') {
+          const id = url.searchParams.get('v');
+          return id || null;
+        }
+        // shorts/ID
+        const parts = url.pathname.split('/').filter(Boolean);
+        if (parts[0] === 'shorts' && parts[1]) {
+          return parts[1];
+        }
+      }
+      return null;
+    }
+
+    function parseLinesToIds(lines) {
+      let skipped = 0;
+      const invalid = [];
+      const entries = [];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        const id = extractYouTubeVideoId(trimmed);
+        if (id) {
+          entries.push({ id, url: trimmed });
+        } else if (trimmed) {
+          skipped += 1;
+          invalid.push(trimmed);
+        }
+      }
+      return { entries, skipped, invalid };
+    }
+
+    function sanitizeCsvValue(value) {
+      if (value === null || value === undefined) return '""';
+      let str = String(value);
+      if (/^[=+\-@]/.test(str)) {
+        str = `'${str}`;
+      }
+      str = str.replace(/"/g, '""');
+      return `"${str}"`;
+    }
+
+    function buildCsv(rows) {
+      const header = [
+        'originalUrl',
+        'videoId',
+        'publishedAt',
+        'durationIso',
+        'durationSeconds',
+        'viewCount',
+        'likeCount',
+        'commentCount',
+        'engagement_likeRate',
+        'engagement_commentRate',
+        'heroImageUrl',
+        'channelHandle'
+      ];
+
+      const lines = [header.map(sanitizeCsvValue).join(',')];
+      for (const row of rows) {
+        const line = [
+          row.originalUrl,
+          row.videoId,
+          row.publishedAt,
+          row.durationIso,
+          row.durationSeconds,
+          row.viewCount,
+          row.likeCount ?? '',
+          row.commentCount ?? '',
+          row.engagement_likeRate ?? '',
+          row.engagement_commentRate ?? '',
+          row.heroImageUrl ?? '',
+          row.channelHandle ?? ''
+        ].map(sanitizeCsvValue).join(',');
+        lines.push(line);
+      }
+      return lines.join('\n');
+    }
+
+    function createFilename() {
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      return `youtube-metadata-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
+    }
+
+    async function fetchVideo(id) {
+      const url = `${API_BASE}/api/video/${encodeURIComponent(id)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    }
+
+    async function processWithLimit(entries, limit, onProgress) {
+      const results = [];
+      let index = 0;
+      let done = 0;
+      let failed = 0;
+
+      async function next() {
+        if (index >= entries.length) return;
+        const current = index++;
+        const entry = entries[current];
+        try {
+          const data = await fetchVideo(entry.id);
+          results.push({ data, originalUrl: entry.url, id: entry.id });
+        } catch (e) {
+          failed += 1;
+          // Push a null-valued row (except id and originalUrl) when fetch fails
+          results.push({ data: null, originalUrl: entry.url, id: entry.id });
+        } finally {
+          done += 1;
+          onProgress(done, entries.length, failed);
+          await next();
+        }
+      }
+
+      const workers = Array.from({ length: Math.min(limit, entries.length) }, () => next());
+      await Promise.all(workers);
+      return { results, failed };
+    }
+
+    function mapToCsvRows(results) {
+      return results.map(({ data: item, originalUrl, id }) => {
+        if (!item || item.error) {
+          return {
+            originalUrl,
+            videoId: id,
+            publishedAt: null,
+            durationIso: null,
+            durationSeconds: null,
+            viewCount: null,
+            likeCount: null,
+            commentCount: null,
+            engagement_likeRate: null,
+            engagement_commentRate: null,
+            heroImageUrl: null,
+            channelHandle: null
+          };
+        }
+
+        const engagement = item.engagement || {};
+        return {
+          originalUrl,
+          videoId: item.videoId,
+          publishedAt: item.publishedAt,
+          durationIso: item.durationIso,
+          durationSeconds: item.durationSeconds,
+          viewCount: item.viewCount,
+          likeCount: item.likeCount ?? '',
+          commentCount: item.commentCount ?? '',
+          engagement_likeRate: engagement.likeRate ?? '',
+          engagement_commentRate: engagement.commentRate ?? '',
+          heroImageUrl: item.heroImageUrl,
+          channelHandle: item.channelHandle ?? ''
+        };
+      });
+    }
+
+    function resetUI() {
+      progressText.textContent = 'Processed 0 of 0 valid videos';
+      skippedText.textContent = '';
+      failedText.textContent = '';
+      downloadLink.style.display = 'none';
+      downloadLink.href = '#';
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      generateBtn.disabled = true;
+      generateBtn.textContent = 'Processing...';
+      resetUI();
+
+      const lines = urlsInput.value.split(/\r?\n/);
+      const { entries, skipped, invalid } = parseLinesToIds(lines);
+
+      if (entries.length === 0) {
+        progressText.textContent = 'Processed 0 of 0 valid videos';
+        if (skipped > 0) {
+          skippedText.textContent = `Skipped ${skipped} invalid URLs.`;
+        }
+        if (invalid.length > 0) {
+          skippedText.textContent = `Skipped ${skipped} invalid URLs: ${invalid.join(', ')}`;
+        }
+        generateBtn.disabled = false;
+        generateBtn.textContent = 'Generate CSV';
+        return;
+      }
+
+      progressText.textContent = `Processed 0 of ${entries.length} valid videos`;
+      if (skipped > 0) {
+        skippedText.textContent = `Skipped ${skipped} invalid URLs.`;
+      }
+      if (invalid.length > 0) {
+        skippedText.textContent = `Skipped ${skipped} invalid URLs: ${invalid.join(', ')}`;
+      }
+
+      const { results, failed } = await processWithLimit(entries, 5, (done, total, failedCount) => {
+        progressText.textContent = `Processed ${done} of ${total} valid videos`;
+        if (failedCount > 0) {
+          failedText.textContent = `Failed ${failedCount} fetches.`;
+        }
+      });
+
+      if (failed > 0 && !failedText.textContent) {
+        failedText.textContent = `Failed ${failed} fetches.`;
+      }
+
+      const csvRows = mapToCsvRows(results);
+      if (csvRows.length === 0) {
+        progressText.textContent = 'No videos fetched successfully.';
+        generateBtn.disabled = false;
+        generateBtn.textContent = 'Generate CSV';
+        return;
+      }
+
+      const csv = buildCsv(csvRows);
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      downloadLink.href = url;
+      downloadLink.download = createFilename();
+      downloadLink.style.display = 'inline-block';
+
+      generateBtn.disabled = false;
+      generateBtn.textContent = 'Generate CSV';
+    });
+  </script>
+</body>
+</html>
