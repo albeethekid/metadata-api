@@ -37,6 +37,7 @@ app.get('/api/video/:videoId', async (req, res) => {
     // Compact response format
     const compact = {
       videoId: videoId,
+      title: videoDetails.snippet?.title || null,
       publishedAt: videoDetails.snippet?.publishedAt || null,
       durationIso: videoDetails.contentDetails?.duration || null,
       durationSeconds: parseDurationToSeconds(videoDetails.contentDetails?.duration) || null,

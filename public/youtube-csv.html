@@ -102,6 +102,7 @@
       const header = [
         'originalUrl',
         'videoId',
+        'title',
         'publishedAt',
         'durationIso',
         'durationSeconds',
@@ -119,6 +120,7 @@
         const line = [
           row.originalUrl,
           row.videoId,
+          row.title,
           row.publishedAt,
           row.durationIso,
           row.durationSeconds,
@@ -183,6 +185,7 @@
           return {
             originalUrl,
             videoId: id,
+            title: null,
             publishedAt: null,
             durationIso: null,
             durationSeconds: null,
@@ -200,6 +203,7 @@
         return {
           originalUrl,
           videoId: item.videoId,
+          title: item.title ?? null,
           publishedAt: item.publishedAt,
           durationIso: item.durationIso,
           durationSeconds: item.durationSeconds,
