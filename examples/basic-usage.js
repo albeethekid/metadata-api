@@ -20,6 +20,7 @@ async function demonstrateAPI() {
       const videoDetails = await youtubeClient.getVideoDetails(videoId);
       console.log(`  Views: ${videoDetails.statistics.viewCount}`);
       console.log(`  Likes: ${videoDetails.statistics.likeCount}`);
+      console.log(`  Channel: ${videoDetails.channel.title} (${videoDetails.channel.handle || 'no handle'})`);
       console.log(`  Description: ${videoDetails.snippet.description.substring(0, 100)}...`);
       console.log();
       

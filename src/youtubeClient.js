@@ -38,7 +38,40 @@ class YouTubeClient {
         id: videoId
       });
       
-      return response.data.items[0];
+      const video = response.data.items[0];
+      if (!video) return video;
+      
+      // Add channel handle information
+      if (video.snippet && video.snippet.channelId) {
+        try {
+          const channelResponse = await this.youtube.channels.list({
+            part: 'snippet',
+            id: video.snippet.channelId
+          });
+          
+          const channel = channelResponse.data.items[0];
+          if (channel && channel.snippet) {
+            const handle = channel.snippet.handle || channel.snippet.customUrl || null;
+            
+            // Augment response with channel information
+            video.channel = {
+              id: video.snippet.channelId,
+              title: video.snippet.channelTitle,
+              handle: handle
+            };
+          }
+        } catch (channelError) {
+          // Fail gracefully - channel lookup errors don't fail the main request
+          console.warn('Channel lookup failed:', channelError.message);
+          video.channel = {
+            id: video.snippet.channelId,
+            title: video.snippet.channelTitle,
+            handle: null
+          };
+        }
+      }
+      
+      return video;
     } catch (error) {
       console.error('Error getting video details:', error.message);
       throw error;
