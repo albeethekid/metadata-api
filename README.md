@@ -1,171 +1,173 @@
-# YouTube API Project
+# YouTube Metadata CSV Tool
 
-A comprehensive Node.js project for integrating with the YouTube Data API v3. This project provides both a REST API server and a client library for common YouTube operations.
+A lightweight utility for extracting structured metadata from YouTube videos and exporting it as a CSV.
+Designed for analysis, ops workflows, and downstream ingestion (Sheets, Excel, BI tools).
 
-## Features
+The app consists of:
 
-- Search for videos
-- Get video details and statistics
-- Retrieve channel information and videos
-- Fetch trending videos
-- Get video comments
-- Access playlist items
-- REST API endpoints for all operations
-- Example usage scripts
+- A serverless API that normalizes YouTube video metadata
+- A minimal static UI that batch-processes YouTube URLs and downloads a CSV
+- No frontend framework required.
 
-## Setup
+## Live API Base
 
-### 1. Get YouTube API Key
+https://youtube-api-project-azure.vercel.app
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project or select an existing one
-3. Enable the YouTube Data API v3
-4. Create credentials (API Key)
-5. Copy your API key
+## API Routes
 
-### 2. Install Dependencies
+### GET /api/video/{VIDEO_ID}
 
-```bash
-npm install
-```
+Fetches normalized metadata for a single YouTube video.
 
-### 3. Configure Environment
+This endpoint is the single source of truth for:
 
-Copy the example environment file and add your API key:
+- duration parsing
+- engagement metrics
+- hero image selection
+- channel handle resolution
 
-```bash
-cp .env.example .env
-```
+#### Example
 
-Edit `.env` and replace `your_youtube_api_key_here` with your actual API key:
+GET /api/video/dQw4w9WgXcQ
 
-```
-YOUTUBE_API_KEY=your_actual_api_key_here
-```
+#### Default (compact) response
 
-## Usage
-
-### Running the REST API Server
-
-```bash
-npm start
-```
-
-The server will start on `http://localhost:3000`. Visit the root URL for API documentation.
-
-### Running the Example Script
-
-```bash
-node examples/basic-usage.js
-```
-
-This will demonstrate all available API methods with sample data.
-
-## API Endpoints
-
-### Search Videos
-```
-GET /api/search?q=query&maxResults=10
-```
-
-### Get Video Details
-```
-GET /api/video/:videoId
-```
-
-### Get Channel Videos
-```
-GET /api/channel/:channelId/videos?maxResults=10
-```
-
-### Get Trending Videos
-```
-GET /api/trending?regionCode=US&maxResults=10
-```
-
-### Get Video Comments
-```
-GET /api/video/:videoId/comments?maxResults=20
-```
-
-### Get Channel Details
-```
-GET /api/channel/:channelId
-```
-
-### Get Playlist Items
-```
-GET /api/playlist/:playlistId?maxResults=50
-```
-
-## Programmatic Usage
-
-```javascript
-const YouTubeClient = require('./src/youtubeClient');
-
-const youtubeClient = new YouTubeClient();
-
-// Search for videos
-const videos = await youtubeClient.searchVideos('JavaScript tutorial', 10);
-
-// Get video details
-const details = await youtubeClient.getVideoDetails('dQw4w9WgXcQ');
-
-// Get trending videos
-const trending = await youtubeClient.getTrendingVideos('US', 5);
-```
-
-## Available Methods
-
-### YouTubeClient Class
-
-- `searchVideos(query, maxResults)` - Search for videos by query
-- `getVideoDetails(videoId)` - Get detailed information about a video
-- `getChannelVideos(channelId, maxResults)` - Get videos from a specific channel
-- `getTrendingVideos(regionCode, maxResults)` - Get trending videos by region
-- `getVideoComments(videoId, maxResults)` - Get comments for a video
-- `getChannelDetails(channelId)` - Get channel information
-- `getPlaylistItems(playlistId, maxResults)` - Get items from a playlist
-
-## Error Handling
-
-All methods throw errors with descriptive messages. Make sure to wrap your API calls in try-catch blocks:
-
-```javascript
-try {
-  const videos = await youtubeClient.searchVideos('query');
-  console.log(videos);
-} catch (error) {
-  console.error('API Error:', error.message);
+```json
+{
+  "videoId": "dQw4w9WgXcQ",
+  "publishedAt": "2009-10-25T06:57:33Z",
+  "durationIso": "PT3M34S",
+  "durationSeconds": 214,
+  "viewCount": 1736217114,
+  "likeCount": 18755791,
+  "commentCount": 2414583,
+  "engagement": {
+    "likeRate": 0.0108,
+    "commentRate": 0.0014
+  },
+  "heroImageUrl": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
+  "channelHandle": "@rickastleyyt"
 }
 ```
 
-## API Quotas
+#### Verbose response (full raw payload)
 
-The YouTube Data API has quota limits:
-- Default quota: 10,000 units per day
-- Search operation: 100 units per request
-- Video details: 1 unit per request
-- Channel details: 1 unit per request
+To return the full YouTube API payload (video + channel data), pass:
 
-Be mindful of your usage to avoid exceeding quotas.
+GET /api/video/dQw4w9WgXcQ?verbose=1
 
-## Development
+This returns the original unfiltered response exactly as received and assembled by the backend.
 
-### Running in Development Mode
+## UI: YouTube → CSV Tool
 
-```bash
-npm run dev
+### URL
+
+/youtube-csv.html
+
+### Description
+
+A simple browser-based tool that allows users to:
+
+- Paste a list of YouTube URLs (one per line)
+- Extract video IDs from valid YouTube links
+- Call the /api/video/{id} endpoint for each video
+- Download a CSV containing normalized metadata
+
+No authentication. No data persistence.
+
+### Supported URL formats
+
+- https://www.youtube.com/watch?v=VIDEO_ID
+- https://www.youtube.com/shorts/VIDEO_ID
+- https://youtu.be/VIDEO_ID
+
+Invalid or non-YouTube URLs are silently skipped and do not appear in the CSV.
+
+### CSV Columns (exact)
+
+- videoId
+- publishedAt
+- durationIso
+- durationSeconds
+- viewCount
+- likeCount
+- commentCount
+- engagement_likeRate
+- engagement_commentRate
+- heroImageUrl
+- channelHandle
+
+Only successfully fetched videos produce rows.
+
+### CSV behavior
+
+- Generated client-side
+- Proper CSV escaping
+- Safe against spreadsheet formula injection
+- Filename format: `youtube-metadata-YYYY-MM-DD-HHMM.csv`
+
+## Google API Usage
+
+### API Used
+
+YouTube Data API v3
+
+Official documentation: https://developers.google.com/youtube/v3
+
+### Calls Made Per Video
+
+The backend endpoint performs two Google API calls per video:
+
+#### videos.list
+
+**Purpose:**
+- duration (contentDetails.duration)
+- views, likes, comments (statistics)
+- thumbnails (snippet.thumbnails)
+- publish date
+
+**Cost:** 1 quota unit
+
+#### channels.list
+
+**Purpose:**
+- resolve channel handle or custom URL
+
+**Cost:** 1 quota unit
+
+**Total cost per video:** ~2 quota units
+
+Default YouTube quota is 10,000 units/day, allowing ~5,000 videos/day at current design.
+
+## Hero Image Selection Logic
+
+The backend selects the best available thumbnail in descending priority:
+
+1. maxres
+2. standard
+3. high
+4. medium
+5. default
+
+The resolved URL is returned as heroImageUrl.
+
+## Engagement Metrics
+
+Computed server-side to keep the UI simple and consistent:
+
+```
+likeRate = likeCount / viewCount
+commentRate = commentCount / viewCount
 ```
 
-This uses nodemon for automatic restarts on file changes.
+If counts are missing or views are zero, rates are returned as null.
 
-### Running Tests
+## Design Principles
 
-```bash
-npm test
-```
+- Minimal surface area
+- No frontend framework
+- Single authoritative API
+- CSV-first output
+- Fail-soft behavior (skip invalid inputs, partial success allowed)
 
-## License
-
-MIT License
+This tool is intentionally scoped for batch analysis and operational workflows rather than end-user presentation.
