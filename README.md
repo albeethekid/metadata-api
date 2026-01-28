@@ -139,6 +139,26 @@ The backend endpoint performs two Google API calls per video:
 
 Default YouTube quota is 10,000 units/day, allowing ~5,000 videos/day at current design.
 
+### API Limits
+
+With a 10,000 unit/day budget:
+
+≈ 5,000 videos/day before quota exhaustion (10,000 ÷ 2).
+
+## Future Improvements
+
+### API Batching
+
+Calls to the Google API can be batched for significant efficiency gains:
+
+If you batch:
+- 50 videos → 2 units total
+- Instead of 100 units
+
+That changes your ceiling from:
+- 5,000 videos/day
+- → ~250,000 videos/day
+
 ## Hero Image Selection Logic
 
 The backend selects the best available thumbnail in descending priority:

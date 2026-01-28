@@ -1,4 +1,5 @@
 const YouTubeClient = require('./youtubeClient');
+const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
@@ -129,6 +130,28 @@ app.get('/api/channel/:channelId', async (req, res) => {
     res.json(channelDetails);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// curl "http://localhost:3000/api/tiktok/video/metrics?url=https%3A%2F%2Fwww.tiktok.com%2F%40yaroslavslonsky%2Fvideo%2F7568246874558237965"
+app.get('/api/tiktok/video/metrics', async (req, res) => {
+  const { url } = req.query;
+  const verbose = req.query.verbose === '1';
+
+  if (!url) {
+    return res.status(400).json({ error: 'MISSING_URL' });
+  }
+
+  try {
+    const payload = await getTikTokVideoMetrics(url, verbose);
+    res.json(payload);
+  } catch (error) {
+    if (error instanceof TikTokMetricsError) {
+      return res.status(error.status).json({ error: error.code });
+    }
+
+    console.error('Unexpected TikTok metrics error:', error);
+    res.status(500).json({ error: 'INTERNAL_ERROR' });
   }
 });
 
