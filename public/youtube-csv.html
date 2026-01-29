@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>YouTube Metadata CSV</title>
+  <title>Social Video Metadata CSV</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; }
     h1 { margin-bottom: 8px; }
@@ -16,9 +16,9 @@
   </style>
 </head>
 <body>
-  <h1>YouTube Metadata CSV</h1>
+  <h1>Social Video Metadata CSV</h1>
   <div class="row">
-    <label for="urls-input"><strong>YouTube URLs (one per line)</strong></label><br />
+    <label for="urls-input"><strong>YouTube or TikTok URLs (one per line)</strong></label><br />
     <textarea id="urls-input" placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ"></textarea>
   </div>
   <div class="row">
@@ -38,6 +38,13 @@
     const skippedText = document.getElementById('skipped-text');
     const failedText = document.getElementById('failed-text');
     const downloadLink = document.getElementById('download-link');
+
+    function detectPlatform(url) {
+      const host = url.hostname.replace(/^www\./, '').toLowerCase();
+      if (host === 'youtu.be' || host.endsWith('youtube.com')) return 'youtube';
+      if (host.endsWith('tiktok.com')) return 'tiktok';
+      return null;
+    }
 
     function extractYouTubeVideoId(rawUrl) {
       if (!rawUrl) return null;
@@ -71,15 +78,58 @@
       return null;
     }
 
+    function extractTikTokInfo(rawUrl) {
+      if (!rawUrl) return null;
+      const trimmed = rawUrl.trim();
+      if (!trimmed) return null;
+      let url;
+      try {
+        url = new URL(trimmed);
+      } catch (e) {
+        return null;
+      }
+
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts.length >= 3 && parts[1] === 'video' && /^\d+$/.test(parts[2]) && parts[0].startsWith('@')) {
+        return { videoId: parts[2], channelHandle: parts[0] };
+      }
+      return null;
+    }
+
     function parseLinesToIds(lines) {
       let skipped = 0;
       const invalid = [];
       const entries = [];
       for (const line of lines) {
         const trimmed = line.trim();
-        const id = extractYouTubeVideoId(trimmed);
-        if (id) {
-          entries.push({ id, url: trimmed });
+        let url;
+        try {
+          url = new URL(trimmed);
+        } catch (e) {
+          if (trimmed) {
+            skipped += 1;
+            invalid.push(trimmed);
+          }
+          continue;
+        }
+
+        const platform = detectPlatform(url);
+        if (platform === 'youtube') {
+          const id = extractYouTubeVideoId(trimmed);
+          if (id) {
+            entries.push({ platform, id, url: trimmed });
+          } else if (trimmed) {
+            skipped += 1;
+            invalid.push(trimmed);
+          }
+        } else if (platform === 'tiktok') {
+          const info = extractTikTokInfo(trimmed);
+          if (info) {
+            entries.push({ platform, id: info.videoId, url: trimmed, channelHandle: info.channelHandle });
+          } else if (trimmed) {
+            skipped += 1;
+            invalid.push(trimmed);
+          }
         } else if (trimmed) {
           skipped += 1;
           invalid.push(trimmed);
@@ -100,6 +150,7 @@
 
     function buildCsv(rows) {
       const header = [
+        'platform',
         'originalUrl',
         'videoId',
         'title',
@@ -118,6 +169,7 @@
       const lines = [header.map(sanitizeCsvValue).join(',')];
       for (const row of rows) {
         const line = [
+          row.platform,
           row.originalUrl,
           row.videoId,
           row.title,
@@ -140,14 +192,23 @@
     function createFilename() {
       const now = new Date();
       const pad = (n) => String(n).padStart(2, '0');
-      return `youtube-metadata-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
+      return `social-video-metadata-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
     }
 
-    async function fetchVideo(id) {
-      const url = `${API_BASE}/api/video/${encodeURIComponent(id)}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
+    async function fetchVideo(entry) {
+      if (entry.platform === 'youtube') {
+        const url = `${API_BASE}/api/video/${encodeURIComponent(entry.id)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }
+      if (entry.platform === 'tiktok') {
+        const url = `${API_BASE}/api/tiktok/video/metrics?url=${encodeURIComponent(entry.url)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }
+      throw new Error('Unsupported platform');
     }
 
     async function processWithLimit(entries, limit, onProgress) {
@@ -161,12 +222,11 @@
         const current = index++;
         const entry = entries[current];
         try {
-          const data = await fetchVideo(entry.id);
-          results.push({ data, originalUrl: entry.url, id: entry.id });
+          const data = await fetchVideo(entry);
+          results.push({ data, originalUrl: entry.url, id: entry.id, platform: entry.platform, channelHandle: entry.channelHandle || null });
         } catch (e) {
           failed += 1;
-          // Push a null-valued row (except id and originalUrl) when fetch fails
-          results.push({ data: null, originalUrl: entry.url, id: entry.id });
+          results.push({ data: null, originalUrl: entry.url, id: entry.id, platform: entry.platform, channelHandle: entry.channelHandle || null });
         } finally {
           done += 1;
           onProgress(done, entries.length, failed);
@@ -180,9 +240,10 @@
     }
 
     function mapToCsvRows(results) {
-      return results.map(({ data: item, originalUrl, id }) => {
+      return results.map(({ data: item, originalUrl, id, platform, channelHandle }) => {
         if (!item || item.error) {
           return {
+            platform,
             originalUrl,
             videoId: id,
             title: null,
@@ -195,12 +256,38 @@
             engagement_likeRate: null,
             engagement_commentRate: null,
             heroImageUrl: null,
-            channelHandle: null
+            channelHandle: platform === 'tiktok' ? channelHandle : null
           };
         }
 
+        if (platform === 'tiktok') {
+          const views = item.metrics?.views ?? 0;
+          const likes = item.metrics?.likes ?? 0;
+          const comments = item.metrics?.comments ?? 0;
+          const likeRate = views > 0 ? likes / views : '';
+          const commentRate = views > 0 ? comments / views : '';
+          return {
+            platform,
+            originalUrl: item.inputUrl,
+            videoId: item.videoId,
+            title: item.description ?? '',
+            publishedAt: item.publishedAt ?? '',
+            durationIso: '',
+            durationSeconds: '',
+            viewCount: item.metrics?.views ?? '',
+            likeCount: likes,
+            commentCount: comments,
+            engagement_likeRate: likeRate,
+            engagement_commentRate: commentRate,
+            heroImageUrl: item.heroImageUrl ?? '',
+            channelHandle: channelHandle
+          };
+        }
+
+        // YouTube
         const engagement = item.engagement || {};
         return {
+          platform,
           originalUrl,
           videoId: item.videoId,
           title: item.title ?? null,
@@ -256,7 +343,9 @@
       }
 
       const { results, failed } = await processWithLimit(entries, 5, (done, total, failedCount) => {
-        progressText.textContent = `Processed ${done} of ${total} valid videos`;
+        const youtubeCount = entries.filter(e => e.platform === 'youtube').length;
+        const tiktokCount = entries.filter(e => e.platform === 'tiktok').length;
+        progressText.textContent = `Processed ${done} of ${total} valid videos (YouTube: ${youtubeCount}, TikTok: ${tiktokCount})`;
         if (failedCount > 0) {
           failedText.textContent = `Failed ${failedCount} fetches.`;
         }

@@ -121,20 +121,37 @@ function resolveVideoObject(json, videoId) {
 }
 
 function formatResponse(inputUrl, videoId, video, verbose = false) {
+  const stats = video?.stats || {};
+  const videoObj = video?.video || video;
+
+  const cover = videoObj?.cover ?? video?.cover ?? null;
+  const originCover = videoObj?.originCover ?? video?.originCover ?? null;
+  const dynamicCover = videoObj?.dynamicCover ?? video?.dynamicCover ?? null;
+
+  const heroImageUrl = originCover || cover || dynamicCover || null;
+  const description = video?.desc ?? video?.description ?? null;
+
   const base = {
     platform: 'tiktok',
-    input_url: inputUrl,
-    video_id: videoId,
-    published_at: toIso(video?.createTime),
+    inputUrl: inputUrl,
+    videoId: videoId,
+    publishedAt: toIso(video?.createTime),
+    description: description,
+    heroImageUrl: heroImageUrl,
     metrics: {
-      views: toNumber(video?.stats?.playCount),
-      likes: toNumber(video?.stats?.diggCount),
-      comments: toNumber(video?.stats?.commentCount),
-      shares: toNumber(video?.stats?.shareCount)
+      views: toNumber(stats?.playCount),
+      likes: toNumber(stats?.diggCount),
+      comments: toNumber(stats?.commentCount),
+      shares: toNumber(stats?.shareCount)
     }
   };
 
   if (verbose) {
+    base.heroImageUrls = {
+      cover: cover,
+      originCover: originCover,
+      dynamicCover: dynamicCover
+    };
     base.raw = video;
   }
 
