@@ -1,12 +1,12 @@
-# YouTube Metadata CSV Tool
+# Social Video Metadata CSV Tool
 
-A lightweight utility for extracting structured metadata from YouTube videos and exporting it as a CSV.
+A lightweight utility for extracting structured metadata from YouTube and TikTok videos and exporting it as a unified CSV.
 Designed for analysis, ops workflows, and downstream ingestion (Sheets, Excel, BI tools).
 
 The app consists of:
 
-- A serverless API that normalizes YouTube video metadata
-- A minimal static UI that batch-processes YouTube URLs and downloads a CSV
+- A serverless API that normalizes video metadata from multiple platforms
+- A minimal static UI that batch-processes YouTube/TikTok URLs and downloads a CSV
 - No frontend framework required.
 
 ## Live API Base
@@ -58,7 +58,48 @@ GET /api/video/dQw4w9WgXcQ?verbose=1
 
 This returns the original unfiltered response exactly as received and assembled by the backend.
 
-## UI: YouTube → CSV Tool
+### GET /api/tiktok/video/metrics?url=<URL_ENCODED_TIKTOK_URL>[&verbose=1]
+
+Fetches normalized metadata for a single TikTok video by scraping the public page and extracting embedded JSON.
+
+#### Example
+
+GET /api/tiktok/video/metrics?url=https%3A%2F%2Fwww.tiktok.com%2F%40yaroslavslonsky%2Fvideo%2F7568246874558237965
+
+#### Default response (camelCase)
+
+```json
+{
+  "platform": "tiktok",
+  "inputUrl": "https://www.tiktok.com/@yaroslavslonsky/video/7568246874558237965",
+  "videoId": "7568246874558237965",
+  "publishedAt": "2025-11-02T21:43:40.000Z",
+  "description": "#sora Potty Training Made Easy...",
+  "heroImageUrl": "https://p16-sign-va.tiktokcdn.com/...",
+  "metrics": {
+    "views": 18700,
+    "likes": 233,
+    "comments": 34,
+    "shares": 24
+  }
+}
+```
+
+#### Verbose response (verbose=1)
+
+Includes `heroImageUrls` and `raw` TikTok item object.
+
+#### Error behavior
+
+- Missing `url`: 400 { "error": "MISSING_URL" }
+- URL not TikTok: 400 { "error": "INVALID_URL" }
+- Cannot extract video ID: 400 { "error": "CANNOT_EXTRACT_VIDEO_ID" }
+- HTML fetch fails: 502 { "error": "PAGE_FETCH_FAILED" }
+- No embedded JSON: 502 { "error": "NO_REHYDRATION_DATA" }
+- Video not found in JSON: 404 { "error": "VIDEO_NOT_FOUND" }
+- Unexpected error: 500 { "error": "INTERNAL_ERROR" }
+
+## UI: Social Video → CSV Tool
 
 ### URL
 
@@ -68,24 +109,31 @@ This returns the original unfiltered response exactly as received and assembled 
 
 A simple browser-based tool that allows users to:
 
-- Paste a list of YouTube URLs (one per line)
-- Extract video IDs from valid YouTube links
-- Call the /api/video/{id} endpoint for each video
-- Download a CSV containing normalized metadata
+- Paste a list of YouTube or TikTok URLs (one per line)
+- Detect platform and extract video IDs/handles from valid links
+- Call the appropriate API endpoint for each video
+- Download a CSV containing unified, normalized metadata
 
 No authentication. No data persistence.
 
 ### Supported URL formats
 
+**YouTube**
 - https://www.youtube.com/watch?v=VIDEO_ID
 - https://www.youtube.com/shorts/VIDEO_ID
 - https://youtu.be/VIDEO_ID
 
-Invalid or non-YouTube URLs are silently skipped and do not appear in the CSV.
+**TikTok**
+- https://www.tiktok.com/@HANDLE/video/VIDEO_ID
+
+Invalid or unsupported URLs are silently skipped and do not appear in the CSV.
 
 ### CSV Columns (exact)
 
+- platform
+- originalUrl
 - videoId
+- title
 - publishedAt
 - durationIso
 - durationSeconds
@@ -104,7 +152,36 @@ Only successfully fetched videos produce rows.
 - Generated client-side
 - Proper CSV escaping
 - Safe against spreadsheet formula injection
-- Filename format: `youtube-metadata-YYYY-MM-DD-HHMM.csv`
+- Filename format: `social-video-metadata-YYYY-MM-DD-HHMM.csv`
+
+### Platform-specific mapping
+
+**YouTube**
+- title: video title
+- duration: from YouTube API
+- engagement: derived from like/comment counts
+
+**TikTok**
+- title: video description/caption
+- duration: empty (not available)
+- engagement: derived from like/comment counts
+- channelHandle: parsed from URL (@handle)
+
+## Platform Implementation Details
+
+### TikTok
+
+- No official API used; fetches public page HTML with a desktop Chrome User-Agent.
+- Extracts embedded JSON from `<script id="SIGI_STATE">` or `<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">`.
+- Resolves the video object by matching the numeric video ID.
+- No headless browsers; pure HTTP fetch + JSON parsing.
+- Rate-limit aware; client-side concurrency limited to 5.
+
+### YouTube
+
+- Uses official YouTube Data API v3.
+- Two API calls per video: videos.list + channels.list.
+- See Google API Usage section for quota details.
 
 ## Google API Usage
 
