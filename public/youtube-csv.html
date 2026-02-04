@@ -18,7 +18,7 @@
 <body>
   <h1>Social Video Metadata CSV</h1>
   <div class="row">
-    <label for="urls-input"><strong>YouTube or TikTok URLs (one per line)</strong></label><br />
+    <label for="urls-input"><strong>YouTube, TikTok, or Instagram URLs (one per line)</strong></label><br />
     <textarea id="urls-input" placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ"></textarea>
   </div>
   <div class="row">
@@ -43,6 +43,7 @@
       const host = url.hostname.replace(/^www\./, '').toLowerCase();
       if (host === 'youtu.be' || host.endsWith('youtube.com')) return 'youtube';
       if (host.endsWith('tiktok.com')) return 'tiktok';
+      if (host.endsWith('instagram.com')) return 'instagram';
       return null;
     }
 
@@ -96,6 +97,28 @@
       return null;
     }
 
+    function isSupportedInstagramPath(pathname) {
+      const parts = pathname.split('/').filter(Boolean);
+      return parts.length >= 2 && (parts[0] === 'p' || parts[0] === 'reel' || parts[0] === 'tv');
+    }
+
+    function extractInstagramShortcode(rawUrl) {
+      if (!rawUrl) return null;
+      const trimmed = rawUrl.trim();
+      if (!trimmed) return null;
+      let url;
+      try {
+        url = new URL(trimmed);
+      } catch (e) {
+        return null;
+      }
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts.length >= 2 && (parts[0] === 'p' || parts[0] === 'reel' || parts[0] === 'tv') && parts[1]) {
+        return parts[1];
+      }
+      return null;
+    }
+
     function parseLinesToIds(lines) {
       let skipped = 0;
       const invalid = [];
@@ -126,6 +149,14 @@
           const info = extractTikTokInfo(trimmed);
           if (info) {
             entries.push({ platform, id: info.videoId, url: trimmed, channelHandle: info.channelHandle });
+          } else if (trimmed) {
+            skipped += 1;
+            invalid.push(trimmed);
+          }
+        } else if (platform === 'instagram') {
+          if (isSupportedInstagramPath(url.pathname)) {
+            const shortcode = extractInstagramShortcode(trimmed);
+            entries.push({ platform, id: shortcode || '', url: trimmed });
           } else if (trimmed) {
             skipped += 1;
             invalid.push(trimmed);
@@ -208,6 +239,12 @@
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       }
+      if (entry.platform === 'instagram') {
+        const url = `${API_BASE}/api/instagram/video?url=${encodeURIComponent(entry.url)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }
       throw new Error('Unsupported platform');
     }
 
@@ -216,6 +253,7 @@
       let index = 0;
       let done = 0;
       let failed = 0;
+      const counts = { youtube: 0, tiktok: 0, instagram: 0 };
 
       async function next() {
         if (index >= entries.length) return;
@@ -224,12 +262,23 @@
         try {
           const data = await fetchVideo(entry);
           results.push({ data, originalUrl: entry.url, id: entry.id, platform: entry.platform, channelHandle: entry.channelHandle || null });
+          let ok = false;
+          if (entry.platform === 'youtube') {
+            ok = data && !data.error && typeof data.videoId === 'string';
+          } else if (entry.platform === 'tiktok') {
+            ok = data && !data.error && typeof data.videoId === 'string' && typeof (data.inputUrl || data.input_url) === 'string';
+          } else if (entry.platform === 'instagram') {
+            ok = data && !data.error && typeof data.videoId === 'string' && typeof data.inputUrl === 'string';
+          }
+          if (ok) {
+            counts[entry.platform] = (counts[entry.platform] || 0) + 1;
+          }
         } catch (e) {
           failed += 1;
           results.push({ data: null, originalUrl: entry.url, id: entry.id, platform: entry.platform, channelHandle: entry.channelHandle || null });
         } finally {
           done += 1;
-          onProgress(done, entries.length, failed);
+          onProgress(done, entries.length, failed, counts);
           await next();
         }
       }
@@ -240,33 +289,45 @@
     }
 
     function mapToCsvRows(results) {
-      return results.map(({ data: item, originalUrl, id, platform, channelHandle }) => {
-        if (!item || item.error) {
-          return {
-            platform,
-            originalUrl,
-            videoId: id,
-            title: null,
-            publishedAt: null,
-            durationIso: null,
-            durationSeconds: null,
-            viewCount: null,
-            likeCount: null,
-            commentCount: null,
-            engagement_likeRate: null,
-            engagement_commentRate: null,
-            heroImageUrl: null,
-            channelHandle: platform === 'tiktok' ? channelHandle : null
-          };
-        }
+      const rows = [];
+      for (const { data: item, originalUrl, id, platform, channelHandle } of results) {
+        if (!item || item.error) continue;
 
         if (platform === 'tiktok') {
-          const views = item.metrics?.views ?? 0;
-          const likes = item.metrics?.likes ?? 0;
-          const comments = item.metrics?.comments ?? 0;
-          const likeRate = views > 0 ? likes / views : '';
-          const commentRate = views > 0 ? comments / views : '';
-          return {
+          if (typeof item.videoId !== 'string' || !(item.inputUrl || item.input_url)) continue;
+          const inputUrl = item.inputUrl || item.input_url;
+          const views = item.metrics?.views;
+          const likes = item.metrics?.likes;
+          const comments = item.metrics?.comments;
+          const likeRate = typeof views === 'number' && views > 0 && typeof likes === 'number' ? likes / views : '';
+          const commentRate = typeof views === 'number' && views > 0 && typeof comments === 'number' ? comments / views : '';
+          rows.push({
+            platform,
+            originalUrl: inputUrl,
+            videoId: item.videoId,
+            title: item.description ?? '',
+            publishedAt: item.publishedAt ?? '',
+            durationIso: '',
+            durationSeconds: '',
+            viewCount: views ?? '',
+            likeCount: likes ?? '',
+            commentCount: comments ?? '',
+            engagement_likeRate: likeRate,
+            engagement_commentRate: commentRate,
+            heroImageUrl: item.heroImageUrl ?? '',
+            channelHandle: channelHandle ?? ''
+          });
+          continue;
+        }
+
+        if (platform === 'instagram') {
+          if (typeof item.videoId !== 'string' || typeof item.inputUrl !== 'string') continue;
+          const views = item.metrics?.views;
+          const likes = item.metrics?.likes;
+          const comments = item.metrics?.comments;
+          const likeRate = typeof views === 'number' && views > 0 && typeof likes === 'number' ? likes / views : '';
+          const commentRate = typeof views === 'number' && views > 0 && typeof comments === 'number' ? comments / views : '';
+          rows.push({
             platform,
             originalUrl: item.inputUrl,
             videoId: item.videoId,
@@ -274,19 +335,20 @@
             publishedAt: item.publishedAt ?? '',
             durationIso: '',
             durationSeconds: '',
-            viewCount: item.metrics?.views ?? '',
-            likeCount: likes,
-            commentCount: comments,
+            viewCount: views ?? '',
+            likeCount: likes ?? '',
+            commentCount: comments ?? '',
             engagement_likeRate: likeRate,
             engagement_commentRate: commentRate,
             heroImageUrl: item.heroImageUrl ?? '',
-            channelHandle: channelHandle
-          };
+            channelHandle: item.authorHandle ?? ''
+          });
+          continue;
         }
 
-        // YouTube
+        // YouTube (default)
         const engagement = item.engagement || {};
-        return {
+        rows.push({
           platform,
           originalUrl,
           videoId: item.videoId,
@@ -301,12 +363,13 @@
           engagement_commentRate: engagement.commentRate ?? '',
           heroImageUrl: item.heroImageUrl,
           channelHandle: item.channelHandle ?? ''
-        };
-      });
+        });
+      }
+      return rows;
     }
 
     function resetUI() {
-      progressText.textContent = 'Processed 0 of 0 valid videos';
+      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0)';
       skippedText.textContent = '';
       failedText.textContent = '';
       downloadLink.style.display = 'none';
@@ -322,7 +385,7 @@
       const { entries, skipped, invalid } = parseLinesToIds(lines);
 
       if (entries.length === 0) {
-        progressText.textContent = 'Processed 0 of 0 valid videos';
+        progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0)';
         if (skipped > 0) {
           skippedText.textContent = `Skipped ${skipped} invalid URLs.`;
         }
@@ -334,7 +397,7 @@
         return;
       }
 
-      progressText.textContent = `Processed 0 of ${entries.length} valid videos`;
+      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0)';
       if (skipped > 0) {
         skippedText.textContent = `Skipped ${skipped} invalid URLs.`;
       }
@@ -342,10 +405,9 @@
         skippedText.textContent = `Skipped ${skipped} invalid URLs: ${invalid.join(', ')}`;
       }
 
-      const { results, failed } = await processWithLimit(entries, 5, (done, total, failedCount) => {
-        const youtubeCount = entries.filter(e => e.platform === 'youtube').length;
-        const tiktokCount = entries.filter(e => e.platform === 'tiktok').length;
-        progressText.textContent = `Processed ${done} of ${total} valid videos (YouTube: ${youtubeCount}, TikTok: ${tiktokCount})`;
+      const { results, failed } = await processWithLimit(entries, 5, (done, total, failedCount, counts) => {
+        const totalSuccess = (counts.youtube || 0) + (counts.tiktok || 0) + (counts.instagram || 0);
+        progressText.textContent = `Processed ${totalSuccess} videos (YouTube: ${counts.youtube || 0}, TikTok: ${counts.tiktok || 0}, Instagram: ${counts.instagram || 0})`;
         if (failedCount > 0) {
           failedText.textContent = `Failed ${failedCount} fetches.`;
         }
