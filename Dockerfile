@@ -10,15 +10,14 @@ COPY package*.json ./
 # Install production dependencies only
 RUN npm ci --omit=dev
 
+# Install Chromium browser matching the installed Playwright version
+RUN npx playwright install --with-deps chromium
+
 # Copy application source
 COPY . .
 
 # Production environment
 ENV NODE_ENV=production
 
-# Railway injects PORT env var; default to 8080
-ENV PORT=8080
-EXPOSE 8080
-
-# Run the app
+# Run the app (Railway injects PORT env var)
 CMD ["npm", "start"]
