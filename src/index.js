@@ -3,7 +3,7 @@ const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics')
 const { scrapeInstagramPost } = require('./instagramScraper');
 const express = require('express');
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8080;
 
 app.use(express.json());
 app.use(express.static('public'));
@@ -398,8 +398,7 @@ app.get('/', (req, res) => {
 
 if (require.main === module) {
   app.listen(port, '0.0.0.0', () => {
-    console.log(`Social Video API server running on port ${port}`);
-    console.log(`Visit http://localhost:${port} for API documentation`);
+    console.log(`Server running on port ${port}`);
   });
 }
 
