@@ -397,7 +397,7 @@ app.get('/', (req, res) => {
 });
 
 if (require.main === module) {
-  app.listen(port, () => {
+  app.listen(port, '0.0.0.0', () => {
     console.log(`Social Video API server running on port ${port}`);
     console.log(`Visit http://localhost:${port} for API documentation`);
   });
