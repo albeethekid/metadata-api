@@ -28,13 +28,30 @@ function fixYtdlpShebang(binaryPath, pythonPath) {
   }
 }
 
+function getPythonPath() {
+  const fs = require('fs');
+  
+  // Check for Homebrew Python (macOS)
+  if (fs.existsSync('/opt/homebrew/bin/python3.11')) {
+    return '/opt/homebrew/bin/python3.11';
+  }
+  
+  // Check for system Python 3.11 (Docker/Linux)
+  if (fs.existsSync('/usr/bin/python3.11')) {
+    return '/usr/bin/python3.11';
+  }
+  
+  // Fallback to python3.11 in PATH
+  return 'python3.11';
+}
+
 async function getYtDlpInstance() {
   if (ytDlpInstance) {
     return ytDlpInstance;
   }
 
   const binaryPath = path.join(__dirname, '..', 'bin', 'yt-dlp');
-  const pythonPath = '/opt/homebrew/bin/python3.11';
+  const pythonPath = getPythonPath();
   
   try {
     ytDlpInstance = new YTDlpWrap(binaryPath, pythonPath);
