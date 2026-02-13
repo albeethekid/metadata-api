@@ -1,5 +1,6 @@
 const YouTubeClient = require('./youtubeClient');
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
+const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
 const { scrapeInstagramPost } = require('./instagramScraper');
 const express = require('express');
 const app = express();
@@ -238,6 +239,28 @@ app.get('/api/tiktok/video/metrics', async (req, res) => {
   }
 });
 
+// curl "http://localhost:3000/api/tiktok/ytdlp?url=https%3A%2F%2Fwww.tiktok.com%2F%40yaroslavslonsky%2Fvideo%2F7568246874558237965"
+app.get('/api/tiktok/ytdlp', async (req, res) => {
+  const { url } = req.query;
+  const verbose = req.query.verbose === '1';
+
+  if (!url) {
+    return res.status(400).json({ error: 'MISSING_URL' });
+  }
+
+  try {
+    const payload = await getTikTokVideoMetricsYtdlp(url, verbose);
+    res.json(payload);
+  } catch (error) {
+    if (error instanceof TikTokYtdlpError) {
+      return res.status(error.status).json({ error: error.code });
+    }
+
+    console.error('Unexpected TikTok yt-dlp error:', error);
+    res.status(500).json({ error: 'INTERNAL_ERROR' });
+  }
+});
+
 // Instagram endpoint for scraping post metrics
 app.get('/api/instagram/video', async (req, res) => {
   const { url } = req.query;
@@ -391,6 +414,7 @@ app.get('/', (req, res) => {
       channel: '/api/channel/:channelId',
       playlist: '/api/playlist/:playlistId?maxResults=50',
       tiktok: '/api/tiktok/video/metrics?url=<URL_ENCODED_TIKTOK_URL>',
+      tiktokYtdlp: '/api/tiktok/ytdlp?url=<URL_ENCODED_TIKTOK_URL> (uses yt-dlp)',
       instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>'
     }
   });

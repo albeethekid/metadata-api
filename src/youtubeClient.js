@@ -5,13 +5,14 @@ class YouTubeClient {
   constructor() {
     this.apiKey = process.env.YOUTUBE_API_KEY;
     if (!this.apiKey) {
-      throw new Error('YOUTUBE_API_KEY environment variable is required');
+      console.warn('WARNING: YOUTUBE_API_KEY not set - YouTube endpoints will not work');
+      this.youtube = null;
+    } else {
+      this.youtube = google.youtube({
+        version: 'v3',
+        auth: this.apiKey
+      });
     }
-    
-    this.youtube = google.youtube({
-      version: 'v3',
-      auth: this.apiKey
-    });
   }
 
   async searchVideos(query, maxResults = 10) {

@@ -100,3 +100,6 @@ typings/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# yt-dlp binary
+bin/
