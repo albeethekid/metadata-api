@@ -108,3 +108,39 @@ node test-tiktok-ytdlp.js
 ```
 
 Note: Ensure Python 3.10+ is installed before testing.
+
+## Serverless Deployment Limitations
+
+### ⚠️ Vercel and Serverless Platforms
+
+The yt-dlp endpoint **does not work on Vercel** or other serverless platforms due to:
+- Python 3.11 runtime not available
+- Read-only filesystem (cannot download/execute binaries)
+- Process spawning limitations
+
+**For Vercel deployments, use the HTTP scraping endpoint instead:**
+```
+/api/tiktok/video/metrics
+```
+
+### ✅ Docker-Based Platforms (Recommended)
+
+The yt-dlp endpoint works on Docker-based platforms:
+- Railway
+- AWS ECS/Fargate
+- Google Cloud Run
+- DigitalOcean App Platform
+- Fly.io
+- Azure Container Instances
+
+See `DOCKER_DEPLOYMENT.md` for Docker setup instructions.
+
+### Error Response
+
+If you try to use the yt-dlp endpoint on Vercel, you'll receive:
+```json
+{
+  "error": "SERVERLESS_UNSUPPORTED",
+  "message": "yt-dlp endpoint is not supported on serverless platforms like Vercel. Use /api/tiktok/video/metrics instead."
+}
+```

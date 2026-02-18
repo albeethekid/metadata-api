@@ -253,7 +253,16 @@ app.get('/api/tiktok/ytdlp', async (req, res) => {
     res.json(payload);
   } catch (error) {
     if (error instanceof TikTokYtdlpError) {
-      return res.status(error.status).json({ error: error.code });
+      const response = { error: error.code };
+      
+      // Add helpful message for serverless environments
+      if (error.code === 'SERVERLESS_UNSUPPORTED') {
+        response.message = 'yt-dlp endpoint is not supported on serverless platforms like Vercel. Use /api/tiktok/video/metrics instead.';
+      } else if (error.code === 'PYTHON_NOT_FOUND') {
+        response.message = 'Python 3.11+ is required but not found. Please install Python 3.11 or higher.';
+      }
+      
+      return res.status(error.status).json(response);
     }
 
     console.error('Unexpected TikTok yt-dlp error:', error);

@@ -13,6 +13,19 @@ class TikTokYtdlpError extends Error {
 let ytDlpInstance = null;
 let isDownloading = false;
 
+function isServerlessEnvironment() {
+  // Detect Vercel, AWS Lambda, or other serverless environments
+  return process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT;
+}
+
+function getBinaryPath() {
+  // Use /tmp for serverless (writable), otherwise use project bin/ directory
+  if (isServerlessEnvironment()) {
+    return path.join('/tmp', 'yt-dlp');
+  }
+  return path.join(__dirname, '..', 'bin', 'yt-dlp');
+}
+
 function fixYtdlpShebang(binaryPath, pythonPath) {
   try {
     const content = fs.readFileSync(binaryPath, 'utf8');
@@ -29,8 +42,6 @@ function fixYtdlpShebang(binaryPath, pythonPath) {
 }
 
 function getPythonPath() {
-  const fs = require('fs');
-  
   // Check for Homebrew Python (macOS)
   if (fs.existsSync('/opt/homebrew/bin/python3.11')) {
     return '/opt/homebrew/bin/python3.11';
@@ -50,7 +61,7 @@ async function getYtDlpInstance() {
     return ytDlpInstance;
   }
 
-  const binaryPath = path.join(__dirname, '..', 'bin', 'yt-dlp');
+  const binaryPath = getBinaryPath();
   const pythonPath = getPythonPath();
   
   try {
@@ -94,8 +105,22 @@ async function getTikTokVideoMetricsYtdlp(encodedUrl, verbose = false) {
   } catch (error) {
     console.error('yt-dlp error:', error.message);
     
+    // Check for Python version issues
     if (error.message && error.message.includes('unsupported version of Python')) {
       throw new TikTokYtdlpError(503, 'PYTHON_VERSION_UNSUPPORTED');
+    }
+    
+    // Check for Python not found (common in serverless)
+    if (error.message && (error.message.includes('python3.11') || error.message.includes('ENOENT'))) {
+      if (isServerlessEnvironment()) {
+        throw new TikTokYtdlpError(503, 'SERVERLESS_UNSUPPORTED');
+      }
+      throw new TikTokYtdlpError(503, 'PYTHON_NOT_FOUND');
+    }
+    
+    // Check for filesystem write errors (serverless read-only filesystem)
+    if (error.message && (error.message.includes('EROFS') || error.message.includes('read-only'))) {
+      throw new TikTokYtdlpError(503, 'SERVERLESS_UNSUPPORTED');
     }
     
     throw new TikTokYtdlpError(502, 'YTDLP_FETCH_FAILED');
