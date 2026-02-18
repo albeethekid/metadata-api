@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Create bin directory for yt-dlp binary download at runtime
+RUN mkdir -p /app/bin && chmod 777 /app/bin
+
 COPY package*.json ./
 RUN npm ci --omit=dev
 
