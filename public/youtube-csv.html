@@ -234,7 +234,7 @@
         return res.json();
       }
       if (entry.platform === 'tiktok') {
-        const url = `${API_BASE}/api/tiktok/video/metrics?url=${encodeURIComponent(entry.url)}`;
+        const url = `${API_BASE}/api/tiktok/ytdlp?url=${encodeURIComponent(entry.url)}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
