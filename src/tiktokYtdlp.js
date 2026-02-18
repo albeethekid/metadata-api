@@ -28,14 +28,33 @@ function getBinaryPath() {
 
 function fixYtdlpShebang(binaryPath, pythonPath) {
   try {
-    const content = fs.readFileSync(binaryPath, 'utf8');
-    const lines = content.split('\n');
+    // Read as binary to preserve zipapp structure
+    const content = fs.readFileSync(binaryPath);
     
-    if (lines[0].startsWith('#!')) {
-      lines[0] = `#!${pythonPath}`;
-      fs.writeFileSync(binaryPath, lines.join('\n'), 'utf8');
-      console.log(`Fixed yt-dlp shebang to use ${pythonPath}`);
+    // Find the first newline (end of shebang line)
+    let newlineIndex = -1;
+    for (let i = 0; i < content.length; i++) {
+      if (content[i] === 0x0a) { // \n
+        newlineIndex = i;
+        break;
+      }
     }
+    
+    if (newlineIndex === -1 || content[0] !== 0x23 || content[1] !== 0x21) { // #!
+      console.warn('No valid shebang found in yt-dlp binary');
+      return;
+    }
+    
+    // Create new shebang
+    const newShebang = Buffer.from(`#!${pythonPath}\n`);
+    
+    // Combine new shebang with rest of binary (after original newline)
+    const restOfFile = content.slice(newlineIndex + 1);
+    const newContent = Buffer.concat([newShebang, restOfFile]);
+    
+    // Write back as binary
+    fs.writeFileSync(binaryPath, newContent);
+    console.log(`Fixed yt-dlp shebang to use ${pythonPath}`);
   } catch (error) {
     console.warn('Could not fix yt-dlp shebang:', error.message);
   }
