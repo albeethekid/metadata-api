@@ -34,7 +34,7 @@ function fixYtdlpShebang(binaryPath, pythonPath) {
     if (lines[0].startsWith('#!')) {
       lines[0] = `#!${pythonPath}`;
       fs.writeFileSync(binaryPath, lines.join('\n'), 'utf8');
-      console.log('Fixed yt-dlp shebang to use Python 3.11');
+      console.log(`Fixed yt-dlp shebang to use ${pythonPath}`);
     }
   } catch (error) {
     console.warn('Could not fix yt-dlp shebang:', error.message);
@@ -42,7 +42,7 @@ function fixYtdlpShebang(binaryPath, pythonPath) {
 }
 
 function getPythonPath() {
-  // Check for Homebrew Python (macOS)
+  // Check for Homebrew Python 3.11 (macOS)
   if (fs.existsSync('/opt/homebrew/bin/python3.11')) {
     return '/opt/homebrew/bin/python3.11';
   }
@@ -52,8 +52,13 @@ function getPythonPath() {
     return '/usr/bin/python3.11';
   }
   
-  // Fallback to python3.11 in PATH
-  return 'python3.11';
+  // Check for system Python 3.10 (Ubuntu Jammy default)
+  if (fs.existsSync('/usr/bin/python3.10')) {
+    return '/usr/bin/python3.10';
+  }
+  
+  // Fallback to python3 in PATH (should be 3.10+ on modern systems)
+  return 'python3';
 }
 
 async function getYtDlpInstance() {

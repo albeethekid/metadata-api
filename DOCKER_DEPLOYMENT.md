@@ -46,34 +46,34 @@ Optional:
 - `NODE_ENV` - Set to `production` (default in Dockerfile)
 - `PORT` - Server port (default: 8080)
 
-## Python 3.11 Installation
+## Python 3.10+ Installation
 
-The Dockerfile installs Python 3.11 from the deadsnakes PPA:
+The Dockerfile uses Ubuntu Jammy's built-in Python 3.10:
 
 ```dockerfile
-RUN apt-get update && apt-get install -y \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y \
-    python3.11 \
-    python3.11-distutils \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-distutils \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 ```
+
+This is faster and more reliable than installing from external PPAs.
 
 ## yt-dlp Binary
 
 The yt-dlp binary is **not** included in the Docker image. It will be:
 1. Auto-downloaded to `bin/yt-dlp` on first API request to `/api/tiktok/ytdlp`
-2. Shebang automatically fixed to use `/usr/bin/python3.11`
+2. Shebang automatically fixed to use the detected Python 3.10+ path
 3. Cached for subsequent requests
 
 ## Python Path Detection
 
-The code automatically detects the Python 3.11 path:
+The code automatically detects the Python path (3.10+):
 - **macOS (Homebrew)**: `/opt/homebrew/bin/python3.11`
-- **Docker/Linux**: `/usr/bin/python3.11`
-- **Fallback**: `python3.11` in PATH
+- **Docker/Linux (3.11)**: `/usr/bin/python3.11`
+- **Docker/Linux (3.10)**: `/usr/bin/python3.10`
+- **Fallback**: `python3` in PATH
 
 ## Volume Mounts (Optional)
 
