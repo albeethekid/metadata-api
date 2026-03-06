@@ -685,7 +685,7 @@ app.get('/api/spotify/metadata', async (req, res) => {
         publishedAt = metadata.release_date || null;
         durationSeconds = metadata.duration_ms ? Math.floor(metadata.duration_ms / 1000) : null;
         heroImageUrl = metadata.images?.[0]?.url || null;
-        channelHandle = metadata.show?.publisher || null;
+        channelHandle = metadata.show?.name || null;
         break;
     }
     
@@ -1126,10 +1126,15 @@ app.get('/api/screenshot', async (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({
-    message: 'Social Video API Server',
+    message: 'Social Media Metadata API Server',
+    ui: {
+      csvGenerator: '/csv.html (Batch process URLs and download CSV)'
+    },
     endpoints: {
-      search: '/api/search?q=query&maxResults=10',
-      video: '/api/video/:videoId?verbose=1 (verbose=1 returns full response, default returns compact)',
+      chartmetric: '/api/chartmetric/metadata?url=<SPOTIFY_URL>&verbose=1 (Spotify tracks, albums, artists, playlists - includes streaming data)',
+      spotify: '/api/spotify/metadata?url=<SPOTIFY_URL>&verbose=1 (Spotify shows, episodes - use Chartmetric for tracks/albums/artists/playlists)',
+      video: '/api/video/:videoId?verbose=1 (YouTube video metadata)',
+      search: '/api/search?q=query&maxResults=10 (YouTube search)',
       channelVideos: '/api/channel/:channelId/videos?maxResults=10',
       trending: '/api/trending?regionCode=US&maxResults=10',
       videoComments: '/api/video/:videoId/comments?maxResults=20',
@@ -1139,6 +1144,13 @@ app.get('/', (req, res) => {
       tiktokYtdlp: '/api/tiktok/ytdlp?url=<URL_ENCODED_TIKTOK_URL> (uses yt-dlp)',
       instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>',
       screenshot: '/api/screenshot?url=<URL_ENCODED_URL>&download=1&fullPage=1'
+    },
+    examples: {
+      chartmetricTrack: '/api/chartmetric/metadata?url=https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp',
+      chartmetricArtist: '/api/chartmetric/metadata?url=https://open.spotify.com/artist/7dIxU1XgxBIa3KJAWzaFAC',
+      spotifyEpisode: '/api/spotify/metadata?url=https://open.spotify.com/episode/0L5BZId2ySpX6Ni64dbbhw',
+      youtube: '/api/video/dQw4w9WgXcQ',
+      tiktok: '/api/tiktok/video/metrics?url=https://www.tiktok.com/@user/video/1234567890'
     }
   });
 });

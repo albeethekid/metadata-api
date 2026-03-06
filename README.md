@@ -1,12 +1,12 @@
-# Social Video Metadata CSV Tool
+# Social Media Metadata API
 
-A lightweight utility for extracting structured metadata from YouTube and TikTok videos and exporting it as a unified CSV.
+A lightweight utility for extracting structured metadata from YouTube, TikTok, Spotify, and Chartmetric, and exporting it as a unified CSV.
 Designed for analysis, ops workflows, and downstream ingestion (Sheets, Excel, BI tools).
 
 The app consists of:
 
-- A serverless API that normalizes video metadata from multiple platforms
-- A minimal static UI that batch-processes YouTube/TikTok URLs and downloads a CSV
+- A serverless API that normalizes metadata from multiple platforms (YouTube, TikTok, Spotify, Chartmetric)
+- A minimal static UI that batch-processes URLs and downloads a CSV
 - No frontend framework required.
 
 ## Live API Base
@@ -14,6 +14,123 @@ The app consists of:
 https://youtube-api-project-azure.vercel.app
 
 ## API Routes
+
+### GET /api/chartmetric/metadata?url=<SPOTIFY_URL>[&verbose=1]
+
+Fetches normalized metadata for Spotify content (tracks, albums, artists, playlists) via the Chartmetric API.
+
+**Recommended for:** Spotify tracks, albums, artists, and playlists when you need streaming data and analytics.
+
+#### Supported Spotify URLs
+
+- **Tracks**: `https://open.spotify.com/track/{id}` - Includes Spotify stream counts
+- **Albums**: `https://open.spotify.com/album/{id}`
+- **Artists**: `https://open.spotify.com/artist/{id}` - **Use this endpoint for artist metadata**
+- **Playlists**: `https://open.spotify.com/playlist/{id}` - Includes follower counts
+
+#### Example
+
+GET /api/chartmetric/metadata?url=https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp
+
+#### Default (normalized) response
+
+```json
+{
+  "platform": "chartmetric",
+  "originalUrl": "https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp",
+  "videoId": "3n3Ppam7vgaVa1iaRUc9Lp",
+  "title": "Smells Like Teen Spirit",
+  "publishedAt": "1991-09-10",
+  "durationIso": "PT5M1S",
+  "durationSeconds": 301,
+  "viewCount": 1234567890,
+  "likeCount": null,
+  "commentCount": null,
+  "engagement_likeRate": null,
+  "engagement_commentRate": null,
+  "heroImageUrl": "https://i.scdn.co/image/...",
+  "channelHandle": "Nirvana"
+}
+```
+
+#### Verbose response (verbose=1)
+
+Returns the raw Chartmetric API response without normalization.
+
+#### Platform-specific field mapping
+
+**Tracks:**
+- `viewCount`: Spotify streams (`cm_statistics.sp_streams`)
+- `channelHandle`: Artist names
+- `publishedAt`: Release date
+
+**Playlists:**
+- `viewCount`: Follower count
+- `channelHandle`: Playlist owner name
+- `publishedAt`: Last updated date
+
+**Artists:**
+- `channelHandle`: Artist name
+- `heroImageUrl`: Artist profile image
+- Additional Chartmetric analytics available in verbose mode
+
+**Albums:**
+- `publishedAt`: Release date
+- `channelHandle`: Artist names
+- `heroImageUrl`: Album artwork
+
+#### Implementation notes
+
+- **ID Conversion**: Tracks, albums, and artists use Chartmetric's `/get-ids` endpoints to convert Spotify IDs to internal Chartmetric IDs
+- **Playlist Search**: Playlists use the Chartmetric search API (fuzzy matching) since direct ID conversion is not available
+- **Authentication**: Uses OAuth refresh token to obtain access tokens (cached for 1 hour)
+
+### GET /api/spotify/metadata?url=<SPOTIFY_URL>[&verbose=1]
+
+Fetches normalized metadata for Spotify content directly from the Spotify API.
+
+**Recommended for:** Spotify shows and episodes. For tracks, albums, artists, and playlists, use the Chartmetric endpoint for additional analytics.
+
+#### Supported Spotify URLs
+
+- **Tracks**: `https://open.spotify.com/track/{id}` (use Chartmetric for stream counts)
+- **Albums**: `https://open.spotify.com/album/{id}` (use Chartmetric for analytics)
+- **Artists**: `https://open.spotify.com/artist/{id}` (use Chartmetric instead)
+- **Playlists**: `https://open.spotify.com/playlist/{id}` (use Chartmetric for follower counts)
+- **Shows**: `https://open.spotify.com/show/{id}`
+- **Episodes**: `https://open.spotify.com/episode/{id}`
+- **Creators URLs**: `https://creators.spotify.com/...` (resolved to canonical URLs)
+
+#### Example
+
+GET /api/spotify/metadata?url=https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp
+
+#### Default (normalized) response
+
+```json
+{
+  "platform": "spotify",
+  "inputUrl": "https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp",
+  "canonicalUrl": "https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp",
+  "type": "track",
+  "id": "3n3Ppam7vgaVa1iaRUc9Lp",
+  "title": "Smells Like Teen Spirit",
+  "publishedAt": "1991-09-10",
+  "durationSeconds": 301,
+  "heroImageUrl": "https://i.scdn.co/image/...",
+  "channelHandle": "Nirvana"
+}
+```
+
+#### Verbose response (verbose=1)
+
+Returns the raw Spotify API response without normalization.
+
+#### Implementation notes
+
+- **Authentication**: Uses Spotify Client Credentials Flow (no user authentication required)
+- **Creators URLs**: Automatically resolves `creators.spotify.com` URLs to canonical `open.spotify.com` URLs
+  - Note: Podcast episode creators URLs are not supported due to incompatible ID format
 
 ### GET /api/video/{VIDEO_ID}
 
@@ -99,19 +216,19 @@ Includes `heroImageUrls` and `raw` TikTok item object.
 - Video not found in JSON: 404 { "error": "VIDEO_NOT_FOUND" }
 - Unexpected error: 500 { "error": "INTERNAL_ERROR" }
 
-## UI: Social Video → CSV Tool
+## UI: Social Media Metadata → CSV Tool
 
 ### URL
 
-/youtube-csv.html
+/csv.html
 
 ### Description
 
 A simple browser-based tool that allows users to:
 
-- Paste a list of YouTube or TikTok URLs (one per line)
-- Detect platform and extract video IDs/handles from valid links
-- Call the appropriate API endpoint for each video
+- Paste a list of YouTube, TikTok, Instagram, or Spotify URLs (one per line)
+- Detect platform and extract IDs/handles from valid links
+- Call the appropriate API endpoint for each URL (Chartmetric for Spotify tracks/albums/artists/playlists, Spotify API for shows/episodes)
 - Download a CSV containing unified, normalized metadata
 
 No authentication. No data persistence.
@@ -125,6 +242,14 @@ No authentication. No data persistence.
 
 **TikTok**
 - https://www.tiktok.com/@HANDLE/video/VIDEO_ID
+
+**Spotify**
+- https://open.spotify.com/track/{id}
+- https://open.spotify.com/album/{id}
+- https://open.spotify.com/artist/{id}
+- https://open.spotify.com/playlist/{id}
+- https://open.spotify.com/show/{id}
+- https://open.spotify.com/episode/{id}
 
 Invalid or unsupported URLs are silently skipped and do not appear in the CSV.
 
@@ -152,7 +277,8 @@ Only successfully fetched videos produce rows.
 - Generated client-side
 - Proper CSV escaping
 - Safe against spreadsheet formula injection
-- Filename format: `social-video-metadata-YYYY-MM-DD-HHMM.csv`
+- Filename format: `social-media-metadata-YYYY-MM-DD-HHMM.csv`
+- Date format: `YYYY-MM-DD` (e.g., 2024-09-05)
 
 ### Platform-specific mapping
 
@@ -166,6 +292,19 @@ Only successfully fetched videos produce rows.
 - duration: empty (not available)
 - engagement: derived from like/comment counts
 - channelHandle: parsed from URL (@handle)
+
+**Spotify (via Spotify API)**
+- title: track/album/artist/playlist name
+- duration: from Spotify API (tracks and episodes only)
+- viewCount: not available
+- channelHandle: artist names, playlist owner, or publisher
+
+**Spotify (via Chartmetric API)**
+- title: track/album/artist/playlist name
+- duration: from Chartmetric (tracks only)
+- viewCount: Spotify streams for tracks, follower count for playlists
+- channelHandle: artist names or playlist owner
+- publishedAt: release date for tracks/albums, last updated for playlists
 
 ## Platform Implementation Details
 
@@ -182,6 +321,28 @@ Only successfully fetched videos produce rows.
 - Uses official YouTube Data API v3.
 - Two API calls per video: videos.list + channels.list.
 - See Google API Usage section for quota details.
+
+### Spotify
+
+- Uses official Spotify Web API.
+- Authentication via Client Credentials Flow (no user login required).
+- Supports tracks, albums, artists, playlists, shows, and episodes.
+- Access tokens cached for 1 hour.
+- Automatically resolves `creators.spotify.com` URLs to canonical `open.spotify.com` URLs.
+- Note: Creators podcast episode URLs are not supported due to incompatible ID format.
+
+### Chartmetric
+
+- Uses Chartmetric API for Spotify music analytics and streaming data.
+- Authentication via OAuth refresh token (access tokens cached for 1 hour).
+- **ID Conversion**: Tracks, albums, and artists use `/get-ids` endpoints to convert Spotify IDs to Chartmetric's internal IDs.
+- **Playlist Lookup**: Uses search API with fuzzy matching (no direct ID conversion available).
+- Provides additional metrics not available in Spotify API:
+  - Spotify stream counts (`cm_statistics.sp_streams`)
+  - Playlist follower counts
+  - Last updated timestamps for playlists
+- Supported entities: tracks, albums, artists, playlists.
+- Not supported: shows, episodes.
 
 ## Google API Usage
 

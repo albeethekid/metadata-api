@@ -72,10 +72,14 @@ const chartmetricClient = {
     get: async (id) => chartmetricApiCall(`/artist/${id}`),
     getBySpotifyId: async (spotifyId) => {
       const ids = await chartmetricApiCall(`/artist/spotify/${spotifyId}/get-ids`);
-      if (!ids || !ids.obj || !ids.obj.cm_artist) {
+      console.log('[Chartmetric] Artist get-ids response:', JSON.stringify(ids));
+      if (!ids || !ids.obj || !Array.isArray(ids.obj) || ids.obj.length === 0 || !ids.obj[0].cm_artist) {
+        console.error('[Chartmetric] Failed to extract cm_artist from response');
         throw new Error('Chartmetric artist ID not found for Spotify ID');
       }
-      return chartmetricApiCall(`/artist/${ids.obj.cm_artist}`);
+      const chartmetricId = ids.obj[0].cm_artist;
+      console.log('[Chartmetric] Using Chartmetric artist ID:', chartmetricId);
+      return chartmetricApiCall(`/artist/${chartmetricId}`);
     }
   },
   track: {

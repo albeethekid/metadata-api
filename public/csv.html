@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Social Video Metadata CSV</title>
+  <title>Social Media Metadata CSV</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; }
     h1 { margin-bottom: 8px; }
@@ -16,9 +16,9 @@
   </style>
 </head>
 <body>
-  <h1>Social Video Metadata CSV</h1>
+  <h1>Social Media Metadata CSV</h1>
   <div class="row">
-    <label for="urls-input"><strong>YouTube, TikTok, or Instagram URLs (one per line)</strong></label><br />
+    <label for="urls-input"><strong>YouTube, TikTok, Instagram, or Spotify URLs (one per line)</strong></label><br />
     <textarea id="urls-input" placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ"></textarea>
   </div>
   <div class="row">
@@ -44,6 +44,7 @@
       if (host === 'youtu.be' || host.endsWith('youtube.com')) return 'youtube';
       if (host.endsWith('tiktok.com')) return 'tiktok';
       if (host.endsWith('instagram.com')) return 'instagram';
+      if (host.endsWith('spotify.com')) return 'spotify';
       return null;
     }
 
@@ -119,6 +120,30 @@
       return null;
     }
 
+    function extractSpotifyInfo(rawUrl) {
+      if (!rawUrl) return null;
+      const trimmed = rawUrl.trim();
+      if (!trimmed) return null;
+      let url;
+      try {
+        url = new URL(trimmed);
+      } catch (e) {
+        return null;
+      }
+      
+      // Match pattern: /track/{id}, /album/{id}, /artist/{id}, /playlist/{id}, /show/{id}, /episode/{id}
+      // Also handle /intl-{locale}/ prefix
+      const pathMatch = url.pathname.match(/\/(track|album|artist|playlist|show|episode)\/([a-zA-Z0-9]+)/);
+      if (pathMatch) {
+        const type = pathMatch[1];
+        const id = pathMatch[2];
+        // Determine which API to use
+        const useChartmetric = ['track', 'album', 'artist', 'playlist'].includes(type);
+        return { type, id, useChartmetric };
+      }
+      return null;
+    }
+
     function parseLinesToIds(lines) {
       let skipped = 0;
       const invalid = [];
@@ -157,6 +182,14 @@
           if (isSupportedInstagramPath(url.pathname)) {
             const shortcode = extractInstagramShortcode(trimmed);
             entries.push({ platform, id: shortcode || '', url: trimmed });
+          } else if (trimmed) {
+            skipped += 1;
+            invalid.push(trimmed);
+          }
+        } else if (platform === 'spotify') {
+          const info = extractSpotifyInfo(trimmed);
+          if (info) {
+            entries.push({ platform, id: info.id, url: trimmed, spotifyType: info.type, useChartmetric: info.useChartmetric });
           } else if (trimmed) {
             skipped += 1;
             invalid.push(trimmed);
@@ -223,7 +256,7 @@
     function createFilename() {
       const now = new Date();
       const pad = (n) => String(n).padStart(2, '0');
-      return `social-video-metadata-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
+      return `social-media-metadata-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
     }
 
     async function fetchVideo(entry) {
@@ -245,6 +278,14 @@
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       }
+      if (entry.platform === 'spotify') {
+        // Use Chartmetric for tracks, albums, artists, playlists; Spotify API for shows, episodes
+        const endpoint = entry.useChartmetric ? 'chartmetric' : 'spotify';
+        const url = `${API_BASE}/api/${endpoint}/metadata?url=${encodeURIComponent(entry.url)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }
       throw new Error('Unsupported platform');
     }
 
@@ -253,7 +294,7 @@
       let index = 0;
       let done = 0;
       let failed = 0;
-      const counts = { youtube: 0, tiktok: 0, instagram: 0 };
+      const counts = { youtube: 0, tiktok: 0, instagram: 0, spotify: 0 };
 
       async function next() {
         if (index >= entries.length) return;
@@ -269,6 +310,8 @@
             ok = data && !data.error && typeof data.videoId === 'string' && typeof (data.inputUrl || data.input_url) === 'string';
           } else if (entry.platform === 'instagram') {
             ok = data && !data.error && typeof data.videoId === 'string' && typeof data.inputUrl === 'string';
+          } else if (entry.platform === 'spotify') {
+            ok = data && !data.error && typeof data.videoId === 'string';
           }
           if (ok) {
             counts[entry.platform] = (counts[entry.platform] || 0) + 1;
@@ -286,6 +329,20 @@
       const workers = Array.from({ length: Math.min(limit, entries.length) }, () => next());
       await Promise.all(workers);
       return { results, failed };
+    }
+
+    function normalizeDate(dateStr) {
+      if (!dateStr) return '';
+      try {
+        const date = new Date(dateStr);
+        if (isNaN(date.getTime())) return '';
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      } catch (e) {
+        return '';
+      }
     }
 
     function mapToCsvRows(results) {
@@ -306,7 +363,7 @@
             originalUrl: inputUrl,
             videoId: item.videoId,
             title: item.description ?? '',
-            publishedAt: item.publishedAt ?? '',
+            publishedAt: normalizeDate(item.publishedAt),
             durationIso: '',
             durationSeconds: '',
             viewCount: views ?? '',
@@ -332,7 +389,7 @@
             originalUrl: item.inputUrl,
             videoId: item.videoId,
             title: item.description ?? '',
-            publishedAt: item.publishedAt ?? '',
+            publishedAt: normalizeDate(item.publishedAt),
             durationIso: '',
             durationSeconds: '',
             viewCount: views ?? '',
@@ -346,22 +403,22 @@
           continue;
         }
 
-        // YouTube (default)
+        // YouTube and Spotify (default - both use same normalized format)
         const engagement = item.engagement || {};
         rows.push({
-          platform,
-          originalUrl,
+          platform: item.platform || platform,
+          originalUrl: item.originalUrl || originalUrl,
           videoId: item.videoId,
           title: item.title ?? null,
-          publishedAt: item.publishedAt,
-          durationIso: item.durationIso,
-          durationSeconds: item.durationSeconds,
-          viewCount: item.viewCount,
+          publishedAt: normalizeDate(item.publishedAt),
+          durationIso: item.durationIso ?? '',
+          durationSeconds: item.durationSeconds ?? '',
+          viewCount: item.viewCount ?? '',
           likeCount: item.likeCount ?? '',
           commentCount: item.commentCount ?? '',
-          engagement_likeRate: engagement.likeRate ?? '',
-          engagement_commentRate: engagement.commentRate ?? '',
-          heroImageUrl: item.heroImageUrl,
+          engagement_likeRate: item.engagement_likeRate ?? engagement.likeRate ?? '',
+          engagement_commentRate: item.engagement_commentRate ?? engagement.commentRate ?? '',
+          heroImageUrl: item.heroImageUrl ?? '',
           channelHandle: item.channelHandle ?? ''
         });
       }
@@ -369,7 +426,7 @@
     }
 
     function resetUI() {
-      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0)';
+      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0)';
       skippedText.textContent = '';
       failedText.textContent = '';
       downloadLink.style.display = 'none';
@@ -385,7 +442,7 @@
       const { entries, skipped, invalid } = parseLinesToIds(lines);
 
       if (entries.length === 0) {
-        progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0)';
+        progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0)';
         if (skipped > 0) {
           skippedText.textContent = `Skipped ${skipped} invalid URLs.`;
         }
@@ -397,7 +454,7 @@
         return;
       }
 
-      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0)';
+      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0)';
       if (skipped > 0) {
         skippedText.textContent = `Skipped ${skipped} invalid URLs.`;
       }
@@ -406,8 +463,8 @@
       }
 
       const { results, failed } = await processWithLimit(entries, 5, (done, total, failedCount, counts) => {
-        const totalSuccess = (counts.youtube || 0) + (counts.tiktok || 0) + (counts.instagram || 0);
-        progressText.textContent = `Processed ${totalSuccess} videos (YouTube: ${counts.youtube || 0}, TikTok: ${counts.tiktok || 0}, Instagram: ${counts.instagram || 0})`;
+        const totalSuccess = (counts.youtube || 0) + (counts.tiktok || 0) + (counts.instagram || 0) + (counts.spotify || 0);
+        progressText.textContent = `Processed ${totalSuccess} videos (YouTube: ${counts.youtube || 0}, TikTok: ${counts.tiktok || 0}, Instagram: ${counts.instagram || 0}, Spotify: ${counts.spotify || 0})`;
         if (failedCount > 0) {
           failedText.textContent = `Failed ${failedCount} fetches.`;
         }
