@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const YouTubeClient = require('./youtubeClient');
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
@@ -400,6 +402,112 @@ function parseInstagramUrl(encodedUrl) {
   }
 }
 
+function parseSpotifyUrl(inputUrl) {
+  try {
+    const decodedUrl = decodeURIComponent(inputUrl);
+    const parsed = new URL(decodedUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    
+    if (!hostname.endsWith('spotify.com')) {
+      return null;
+    }
+    
+    if (hostname === 'creators.spotify.com') {
+      return { needsResolver: true, url: decodedUrl };
+    }
+    
+    if (hostname !== 'open.spotify.com') {
+      return null;
+    }
+    
+    let segments = parsed.pathname.split('/').filter(s => s);
+    
+    if (segments.length === 0) {
+      return null;
+    }
+    
+    if (segments[0].startsWith('intl-')) {
+      segments.shift();
+    }
+    
+    if (segments[0] === 'embed') {
+      segments.shift();
+    }
+    
+    if (segments.length < 2) {
+      return null;
+    }
+    
+    const type = segments[0];
+    const id = segments[1];
+    
+    const allowedTypes = ['playlist', 'artist', 'show', 'track', 'album', 'episode'];
+    if (!allowedTypes.includes(type)) {
+      return null;
+    }
+    
+    const canonicalUrl = `https://open.spotify.com/${type}/${id}`;
+    
+    return {
+      platform: 'spotify',
+      type,
+      id,
+      canonicalUrl
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+async function resolveCreatorsUrl(url) {
+  try {
+    console.log('[Creators Resolver] Resolving URL:', url);
+    
+    // Creators podcast episode URLs use internal IDs that are not compatible with Spotify API
+    // Format: creators.spotify.com/pod/profile/{show}/episodes/{episode-slug}-{episode-id}
+    const creatorsEpisodeMatch = url.match(/creators\.spotify\.com\/pod\/profile\/[^\/]+\/episodes\//);
+    if (creatorsEpisodeMatch) {
+      console.log('[Creators Resolver] Creators podcast episode URLs are not supported - ID format incompatible');
+      return null;
+    }
+    
+    // Fallback: Try to fetch and parse HTML for other creators URL formats
+    const fetch = require('node-fetch');
+    console.log('[Creators Resolver] Fetching URL for HTML parsing');
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      },
+      timeout: 10000
+    });
+    
+    if (!response.ok) {
+      console.log('[Creators Resolver] Response not OK');
+      return null;
+    }
+    
+    const html = await response.text();
+    
+    const openSpotifyMatch = html.match(/https:\/\/open\.spotify\.com\/episode\/([a-zA-Z0-9]+)/);
+    if (openSpotifyMatch) {
+      console.log('[Creators Resolver] Found episode URL in HTML:', openSpotifyMatch[0]);
+      return `https://open.spotify.com/episode/${openSpotifyMatch[1]}`;
+    }
+    
+    const spotifyUriMatch = html.match(/spotify:episode:([a-zA-Z0-9]+)/);
+    if (spotifyUriMatch) {
+      console.log('[Creators Resolver] Found episode URI in HTML:', spotifyUriMatch[0]);
+      return `https://open.spotify.com/episode/${spotifyUriMatch[1]}`;
+    }
+    
+    console.log('[Creators Resolver] No episode URL found');
+    return null;
+  } catch (error) {
+    console.error('[Creators Resolver] Error:', error.message);
+    return null;
+  }
+}
+
 app.get('/api/playlist/:playlistId', async (req, res) => {
   try {
     const { playlistId } = req.params;
@@ -408,6 +516,611 @@ app.get('/api/playlist/:playlistId', async (req, res) => {
     res.json(items);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/spotify/metadata', async (req, res) => {
+  const { getSpotifyClient } = require('./spotify');
+  
+  try {
+    const { url, verbose } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'invalid_url' });
+    }
+    
+    let parsed = parseSpotifyUrl(url);
+    
+    if (!parsed) {
+      return res.status(400).json({ error: 'unsupported_spotify_url' });
+    }
+    
+    if (parsed.needsResolver) {
+      const resolvedUrl = await resolveCreatorsUrl(parsed.url);
+      if (!resolvedUrl) {
+        return res.status(400).json({ error: 'unsupported_creators_url' });
+      }
+      parsed = parseSpotifyUrl(resolvedUrl);
+      if (!parsed) {
+        return res.status(400).json({ error: 'unsupported_creators_url' });
+      }
+    }
+    
+    const { type, id, canonicalUrl } = parsed;
+    
+    console.log('[Spotify endpoint] Getting client for type:', type, 'id:', id);
+    
+    let spotify;
+    try {
+      spotify = await getSpotifyClient();
+      console.log('[Spotify endpoint] Client obtained, tracks:', !!spotify.tracks);
+    } catch (error) {
+      console.error('[Spotify endpoint] Client error:', error);
+      return res.status(500).json({ 
+        error: 'spotify_client_error',
+        detail: error.message 
+      });
+    }
+    
+    let metadata;
+    try {
+      console.log('[Spotify endpoint] Fetching metadata for', type, id);
+      switch (type) {
+        case 'track':
+          metadata = await spotify.tracks.get(id);
+          break;
+        case 'album':
+          metadata = await spotify.albums.get(id);
+          break;
+        case 'artist':
+          metadata = await spotify.artists.get(id);
+          break;
+        case 'playlist':
+          metadata = await spotify.playlists.getPlaylist(id);
+          break;
+        case 'show':
+          metadata = await spotify.shows.get(id);
+          break;
+        case 'episode':
+          metadata = await spotify.episodes.get(id);
+          break;
+        default:
+          return res.status(400).json({ error: 'unsupported_spotify_url' });
+      }
+    } catch (error) {
+      if (error.status === 429) {
+        const retryAfter = error.headers?.['retry-after'];
+        if (retryAfter) {
+          await new Promise(resolve => setTimeout(resolve, parseInt(retryAfter) * 1000));
+          try {
+            switch (type) {
+              case 'track':
+                metadata = await spotify.tracks.get(id);
+                break;
+              case 'album':
+                metadata = await spotify.albums.get(id);
+                break;
+              case 'artist':
+                metadata = await spotify.artists.get(id);
+                break;
+              case 'playlist':
+                metadata = await spotify.playlists.getPlaylist(id);
+                break;
+              case 'show':
+                metadata = await spotify.shows.get(id);
+                break;
+              case 'episode':
+                metadata = await spotify.episodes.get(id);
+                break;
+            }
+          } catch (retryError) {
+            return res.status(502).json({ 
+              error: 'spotify_api_error',
+              detail: retryError.message 
+            });
+          }
+        } else {
+          return res.status(502).json({ 
+            error: 'spotify_api_error',
+            detail: 'Rate limited by Spotify API' 
+          });
+        }
+      } else {
+        return res.status(502).json({ 
+          error: 'spotify_api_error',
+          detail: error.message 
+        });
+      }
+    }
+    
+    let title = null;
+    let publishedAt = null;
+    let durationSeconds = null;
+    let heroImageUrl = null;
+    let channelHandle = null;
+    
+    switch (type) {
+      case 'track':
+        title = metadata.name;
+        publishedAt = metadata.album?.release_date || null;
+        durationSeconds = metadata.duration_ms ? Math.floor(metadata.duration_ms / 1000) : null;
+        heroImageUrl = metadata.album?.images?.[0]?.url || null;
+        channelHandle = metadata.artists?.map(a => a.name).join(', ') || null;
+        break;
+        
+      case 'album':
+        title = metadata.name;
+        publishedAt = metadata.release_date || null;
+        durationSeconds = null;
+        heroImageUrl = metadata.images?.[0]?.url || null;
+        channelHandle = metadata.artists?.map(a => a.name).join(', ') || null;
+        break;
+        
+      case 'artist':
+        title = metadata.name;
+        publishedAt = null;
+        durationSeconds = null;
+        heroImageUrl = metadata.images?.[0]?.url || null;
+        channelHandle = metadata.name;
+        break;
+        
+      case 'playlist':
+        title = metadata.name;
+        publishedAt = null;
+        durationSeconds = null;
+        heroImageUrl = metadata.images?.[0]?.url || null;
+        channelHandle = metadata.owner?.display_name || null;
+        break;
+        
+      case 'show':
+        title = metadata.name;
+        publishedAt = null;
+        durationSeconds = null;
+        heroImageUrl = metadata.images?.[0]?.url || null;
+        channelHandle = metadata.publisher || null;
+        break;
+        
+      case 'episode':
+        title = metadata.name;
+        publishedAt = metadata.release_date || null;
+        durationSeconds = metadata.duration_ms ? Math.floor(metadata.duration_ms / 1000) : null;
+        heroImageUrl = metadata.images?.[0]?.url || null;
+        channelHandle = metadata.show?.publisher || null;
+        break;
+    }
+    
+    if (verbose === '1') {
+      return res.json(metadata);
+    }
+    
+    const response = {
+      platform: 'spotify',
+      inputUrl: url,
+      canonicalUrl,
+      type,
+      id,
+      title,
+      publishedAt,
+      durationSeconds,
+      heroImageUrl,
+      channelHandle
+    };
+    
+    res.json(response);
+    
+  } catch (error) {
+    console.error('Spotify metadata error:', error);
+    res.status(500).json({ 
+      error: 'internal_error',
+      detail: error.message 
+    });
+  }
+});
+
+app.get('/api/chartmetric/metadata', async (req, res) => {
+  const { getChartmetricClient } = require('./chartmetric');
+  
+  try {
+    const { url, verbose } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'invalid_url' });
+    }
+    
+    let parsed = parseSpotifyUrl(url);
+    
+    if (!parsed) {
+      return res.status(400).json({ error: 'unsupported_spotify_url' });
+    }
+    
+    if (parsed.needsResolver) {
+      const resolvedUrl = await resolveCreatorsUrl(parsed.url);
+      if (!resolvedUrl) {
+        return res.status(400).json({ error: 'unsupported_creators_url' });
+      }
+      parsed = parseSpotifyUrl(resolvedUrl);
+      if (!parsed) {
+        return res.status(400).json({ error: 'unsupported_creators_url' });
+      }
+    }
+    
+    const { type, id, canonicalUrl } = parsed;
+    
+    console.log('[Chartmetric endpoint] Getting client for type:', type, 'id:', id);
+    
+    let chartmetric;
+    try {
+      chartmetric = await getChartmetricClient();
+      console.log('[Chartmetric endpoint] Client obtained');
+    } catch (error) {
+      console.error('[Chartmetric endpoint] Client error:', error);
+      return res.status(500).json({ 
+        error: 'chartmetric_client_error',
+        detail: error.message 
+      });
+    }
+    
+    let metadata;
+    try {
+      console.log('[Chartmetric endpoint] Fetching metadata for', type, id);
+      switch (type) {
+        case 'track':
+          metadata = await chartmetric.track.getBySpotifyId(id);
+          break;
+        case 'album':
+          metadata = await chartmetric.album.getBySpotifyId(id);
+          break;
+        case 'artist':
+          metadata = await chartmetric.artist.getBySpotifyId(id);
+          break;
+        case 'playlist':
+          metadata = await chartmetric.playlist.getBySpotifyId(id);
+          break;
+        case 'show':
+        case 'episode':
+          return res.status(400).json({ 
+            error: 'unsupported_type',
+            detail: 'Chartmetric does not support Spotify shows or episodes' 
+          });
+        default:
+          return res.status(400).json({ error: 'unsupported_spotify_url' });
+      }
+    } catch (error) {
+      return res.status(502).json({ 
+        error: 'chartmetric_api_error',
+        detail: error.message 
+      });
+    }
+    
+    if (verbose === '1') {
+      return res.json(metadata);
+    }
+    
+    const obj = metadata.obj || metadata;
+    
+    const durationSeconds = obj.duration_ms ? Math.floor(obj.duration_ms / 1000) : null;
+    let durationIso = null;
+    if (durationSeconds !== null) {
+      const hours = Math.floor(durationSeconds / 3600);
+      const minutes = Math.floor((durationSeconds % 3600) / 60);
+      const seconds = durationSeconds % 60;
+      durationIso = 'PT';
+      if (hours > 0) durationIso += `${hours}H`;
+      if (minutes > 0) durationIso += `${minutes}M`;
+      if (seconds > 0 || (hours === 0 && minutes === 0)) durationIso += `${seconds}S`;
+    }
+    
+    const response = {
+      platform: 'chartmetric',
+      originalUrl: url,
+      videoId: id,
+      title: obj.name || null,
+      publishedAt: obj.release_date || obj.releaseDate || obj.last_updated || null,
+      durationIso: durationIso,
+      durationSeconds: durationSeconds,
+      viewCount: obj.cm_statistics?.sp_streams || obj.followers || null,
+      likeCount: null,
+      commentCount: null,
+      engagement_likeRate: null,
+      engagement_commentRate: null,
+      heroImageUrl: obj.image_url || obj.imageUrl || (obj.images && obj.images[0] && obj.images[0].url) || null,
+      channelHandle: obj.artist_names || obj.artistNames || (obj.artists && obj.artists.map(a => a.name).join(', ')) || obj.publisher || obj.owner_name || null
+    };
+    
+    res.json(response);
+    
+  } catch (error) {
+    console.error('Chartmetric metadata error:', error);
+    res.status(500).json({ 
+      error: 'internal_error',
+      detail: error.message 
+    });
+  }
+});
+
+// Screenshot endpoint - capture webpage screenshots with anti-detection and block detection
+// Examples:
+//   /api/screenshot?url=https%3A%2F%2Fexample.com
+//   /api/screenshot?url=https%3A%2F%2Fexample.com&download=1
+//   /api/screenshot?url=https%3A%2F%2Fexample.com&fullPage=1
+//   /api/screenshot?url=https%3A%2F%2Fexample.com&meta=1
+app.get('/api/screenshot', async (req, res) => {
+  const { chromium } = require('playwright');
+  let context = null;
+  let page = null;
+
+  function detectBlockPage(title, htmlSnippet) {
+    const lowerTitle = (title || '').toLowerCase();
+    const lowerSnippet = (htmlSnippet || '').toLowerCase();
+    const combined = lowerTitle + ' ' + lowerSnippet;
+
+    const blockIndicators = [
+      { pattern: /cloudflare/i, reason: 'cloudflare' },
+      { pattern: /akamai/i, reason: 'akamai' },
+      { pattern: /imperva/i, reason: 'imperva' },
+      { pattern: /incapsula/i, reason: 'incapsula' },
+      { pattern: /datadome/i, reason: 'datadome' },
+      { pattern: /access denied/i, reason: 'generic' },
+      { pattern: /request blocked/i, reason: 'generic' },
+      { pattern: /attention required/i, reason: 'generic' },
+      { pattern: /forbidden/i, reason: 'generic' },
+      { pattern: /not authorized/i, reason: 'generic' },
+      { pattern: /bot detection/i, reason: 'generic' },
+      { pattern: /unusual traffic/i, reason: 'generic' }
+    ];
+
+    for (const { pattern, reason } of blockIndicators) {
+      if (pattern.test(combined)) {
+        return { blocked: true, reason };
+      }
+    }
+
+    return { blocked: false, reason: null };
+  }
+
+  try {
+    const { url, download, fullPage, meta, debug } = req.query;
+    const debugMode = debug === '1';
+
+    if (!url) {
+      return res.status(400).json({ error: 'MISSING_URL' });
+    }
+
+    let targetUrl;
+    try {
+      targetUrl = new URL(url);
+    } catch (e) {
+      return res.status(400).json({ error: 'INVALID_URL' });
+    }
+
+    if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
+      return res.status(400).json({ error: 'INVALID_URL_PROTOCOL' });
+    }
+
+    const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+    const path = require('path');
+    const profilePath = path.join(__dirname, '..', 'reddit-profile');
+
+    context = await chromium.launchPersistentContext(profilePath, {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled'
+      ],
+      viewport: { width: 1200, height: 800 },
+      locale: 'en-US',
+      timezoneId: 'America/Los_Angeles',
+      userAgent: userAgent,
+      bypassCSP: true,
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-User': '?1',
+        'Sec-Fetch-Dest': 'document',
+        'Upgrade-Insecure-Requests': '1'
+      }
+    });
+
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined
+      });
+
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5]
+      });
+
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en']
+      });
+
+      window.chrome = {
+        runtime: {}
+      };
+
+      Object.defineProperty(navigator, 'permissions', {
+        get: () => ({
+          query: () => Promise.resolve({ state: 'prompt' })
+        })
+      });
+
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+          Promise.resolve({ state: Notification.permission }) :
+          originalQuery(parameters)
+      );
+
+      Object.defineProperty(navigator, 'platform', {
+        get: () => 'MacIntel'
+      });
+
+      Object.defineProperty(navigator, 'vendor', {
+        get: () => 'Google Inc.'
+      });
+    });
+
+    page = await context.newPage();
+
+    if (debugMode) {
+      page.on('requestfailed', (request) => {
+        const resourceType = request.resourceType();
+        const reqUrl = request.url();
+        const isRedditMedia = reqUrl.includes('redd.it') || reqUrl.includes('redditstatic') || 
+                              reqUrl.includes('external-preview') || reqUrl.includes('preview');
+        
+        if (resourceType === 'image' || isRedditMedia) {
+          console.log('[requestfailed]', resourceType, request.failure()?.errorText || 'unknown', reqUrl);
+        }
+      });
+
+      page.on('response', async (response) => {
+        const respUrl = response.url();
+        const status = response.status();
+        const contentType = response.headers()['content-type'] || '';
+        const isRedditMedia = respUrl.includes('redd.it') || respUrl.includes('redditstatic') || 
+                              respUrl.includes('external-preview') || respUrl.includes('preview');
+        
+        if (contentType.startsWith('image/') || isRedditMedia) {
+          console.log('[image response]', status, contentType, respUrl);
+          
+          if (status >= 400 || (isRedditMedia && !contentType.startsWith('image/'))) {
+            console.log('[image suspicious]', status, contentType, respUrl);
+          }
+        }
+      });
+    }
+
+    await page.goto(url, {
+      waitUntil: 'networkidle',
+      timeout: 30000
+    });
+
+    const isReddit = url.toLowerCase().includes('reddit.com');
+    const isInstagram = url.toLowerCase().includes('instagram.com');
+    
+    if (isReddit) {
+      const selectors = [
+        'button:has-text("Accept All")',
+        'button:has-text("Accept all")',
+        'button:has-text("Accept")',
+        'button:has-text("I Agree")',
+        'button:has-text("Continue")',
+        '[aria-label="Close"]',
+        'button[aria-label="Close"]',
+        '[role="dialog"] button:has-text("Not Now")',
+        'button:has-text("Not Now")'
+      ];
+      for (const sel of selectors) {
+        try {
+          const loc = page.locator(sel).first();
+          if (await loc.count() && await loc.isVisible()) {
+            await loc.click({ timeout: 800 }).catch(() => {});
+            await page.waitForTimeout(150);
+          }
+        } catch {}
+      }
+
+      await page.waitForTimeout(400);
+      await page.evaluate(() => window.scrollTo(0, window.innerHeight * 1.5));
+      await page.waitForTimeout(600);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(400);
+
+      try {
+        const post = page.locator('shreddit-post, [data-testid="post-container"], main').first();
+        if (await post.count()) await post.scrollIntoViewIfNeeded().catch(() => {});
+      } catch {}
+
+      await page.waitForFunction(() => {
+        const imgs = Array.from(document.images || []);
+        const interesting = imgs.filter(img => {
+          const s = (img.currentSrc || img.src || '').toLowerCase();
+          return s.includes('redd.it') || s.includes('redditstatic') || s.includes('preview') || s.includes('external-preview');
+        });
+        const pool = interesting.length ? interesting : imgs.slice(0, 6);
+        if (!pool.length) return true;
+
+        return pool.every(img => img.complete && img.naturalWidth > 0);
+      }, { timeout: 8000 }).catch(() => {
+        console.log('Reddit images did not fully load within timeout');
+      });
+    } else if (isInstagram) {
+      await page.waitForTimeout(2000);
+      
+      await page.evaluate(() => window.scrollTo(0, window.innerHeight * 1.5));
+      await page.waitForTimeout(1500);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(2000);
+    } else {
+      await page.waitForTimeout(2000);
+    }
+
+    if (debugMode) {
+      console.log('[final url]', page.url());
+    }
+
+    let title = null;
+    let htmlSnippet = null;
+    try {
+      title = await page.title();
+      const fullHtml = await page.content();
+      htmlSnippet = fullHtml.substring(0, 50000);
+    } catch (e) {
+      console.error('Error extracting page metadata:', e);
+    }
+
+    const { blocked, reason } = detectBlockPage(title, htmlSnippet);
+
+    const screenshotBuffer = await page.screenshot({
+      type: 'jpeg',
+      quality: 65,
+      fullPage: fullPage === '1'
+    });
+
+    if (meta === '1') {
+      const base64Image = `data:image/jpeg;base64,${screenshotBuffer.toString('base64')}`;
+      return res.json({
+        ok: !blocked,
+        inputUrl: url,
+        blocked: blocked,
+        title: title || null,
+        reason: reason || null,
+        imageBase64: base64Image
+      });
+    }
+
+    const hostname = targetUrl.hostname.replace(/[^a-z0-9.-]/gi, '_');
+    const timestamp = Date.now();
+    const filename = `screenshot-${hostname}-${timestamp}.jpg`;
+    const disposition = download === '1' ? 'attachment' : 'inline';
+
+    const truncatedTitle = title ? encodeURIComponent(title.substring(0, 120)) : '';
+
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
+    res.setHeader('X-Screenshot-Blocked', blocked ? '1' : '0');
+    if (truncatedTitle) {
+      res.setHeader('X-Screenshot-Title', truncatedTitle);
+    }
+    if (blocked && reason) {
+      res.setHeader('X-Screenshot-Block-Reason', encodeURIComponent(reason));
+    }
+    res.send(screenshotBuffer);
+
+  } catch (error) {
+    console.error('Screenshot error:', error);
+    if (!res.headersSent) {
+      res.status(502).json({ error: 'SCREENSHOT_FAILED' });
+    }
+  } finally {
+    if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
   }
 });
 
@@ -424,7 +1137,8 @@ app.get('/', (req, res) => {
       playlist: '/api/playlist/:playlistId?maxResults=50',
       tiktok: '/api/tiktok/video/metrics?url=<URL_ENCODED_TIKTOK_URL>',
       tiktokYtdlp: '/api/tiktok/ytdlp?url=<URL_ENCODED_TIKTOK_URL> (uses yt-dlp)',
-      instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>'
+      instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>',
+      screenshot: '/api/screenshot?url=<URL_ENCODED_URL>&download=1&fullPage=1'
     }
   });
 });
