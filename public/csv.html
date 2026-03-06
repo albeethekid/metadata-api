@@ -294,6 +294,7 @@
       let index = 0;
       let done = 0;
       let failed = 0;
+      const failedUrls = [];
       const counts = { youtube: 0, tiktok: 0, instagram: 0, spotify: 0 };
 
       async function next() {
@@ -318,6 +319,7 @@
           }
         } catch (e) {
           failed += 1;
+          failedUrls.push(entry.url);
           results.push({ data: null, originalUrl: entry.url, id: entry.id, platform: entry.platform, channelHandle: entry.channelHandle || null });
         } finally {
           done += 1;
@@ -328,7 +330,7 @@
 
       const workers = Array.from({ length: Math.min(limit, entries.length) }, () => next());
       await Promise.all(workers);
-      return { results, failed };
+      return { results, failed, failedUrls };
     }
 
     function normalizeDate(dateStr) {
@@ -462,7 +464,7 @@
         skippedText.textContent = `Skipped ${skipped} invalid URLs: ${invalid.join(', ')}`;
       }
 
-      const { results, failed } = await processWithLimit(entries, 5, (done, total, failedCount, counts) => {
+      const { results, failed, failedUrls } = await processWithLimit(entries, 5, (done, total, failedCount, counts) => {
         const totalSuccess = (counts.youtube || 0) + (counts.tiktok || 0) + (counts.instagram || 0) + (counts.spotify || 0);
         progressText.textContent = `Processed ${totalSuccess} videos (YouTube: ${counts.youtube || 0}, TikTok: ${counts.tiktok || 0}, Instagram: ${counts.instagram || 0}, Spotify: ${counts.spotify || 0})`;
         if (failedCount > 0) {
@@ -472,6 +474,9 @@
 
       if (failed > 0 && !failedText.textContent) {
         failedText.textContent = `Failed ${failed} fetches.`;
+      }
+      if (failedUrls.length > 0) {
+        failedText.textContent = `Failed ${failed} fetches: ${failedUrls.join(', ')}`;
       }
 
       const csvRows = mapToCsvRows(results);

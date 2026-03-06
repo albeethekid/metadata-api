@@ -100,10 +100,14 @@ const chartmetricClient = {
     get: async (id) => chartmetricApiCall(`/album/${id}`),
     getBySpotifyId: async (spotifyId) => {
       const ids = await chartmetricApiCall(`/album/spotify/${spotifyId}/get-ids`);
-      if (!ids || !ids.obj || !ids.obj.cm_album) {
+      console.log('[Chartmetric] Album get-ids response:', JSON.stringify(ids));
+      if (!ids || !ids.obj || !Array.isArray(ids.obj) || ids.obj.length === 0 || !ids.obj[0].cm_album) {
+        console.error('[Chartmetric] Failed to extract cm_album from response');
         throw new Error('Chartmetric album ID not found for Spotify ID');
       }
-      return chartmetricApiCall(`/album/${ids.obj.cm_album}`);
+      const chartmetricId = ids.obj[0].cm_album;
+      console.log('[Chartmetric] Using Chartmetric album ID:', chartmetricId);
+      return chartmetricApiCall(`/album/${chartmetricId}`);
     }
   },
   playlist: {
