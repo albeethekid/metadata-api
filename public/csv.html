@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Social Media Metadata CSV</title>
+  <title>Social Media & Web Metadata CSV</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; }
     h1 { margin-bottom: 8px; }
@@ -16,10 +16,17 @@
   </style>
 </head>
 <body>
-  <h1>Social Media Metadata CSV</h1>
+  <h1>Social Media & Web Metadata CSV</h1>
   <div class="row">
-    <label for="urls-input"><strong>YouTube, TikTok, Instagram, or Spotify URLs (one per line)</strong></label><br />
+    <label for="urls-input"><strong>YouTube, TikTok, Instagram, Spotify, or any web URLs (one per line)</strong></label><br />
     <textarea id="urls-input" placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ"></textarea>
+  </div>
+  <div class="row">
+    <label>
+      <input type="checkbox" id="include-screenshots" checked />
+      <strong>Include screenshots for unsupported URLs</strong>
+      <span class="muted">(uses screenshot endpoint for non-video URLs and unsupported page types)</span>
+    </label>
   </div>
   <div class="row">
     <button id="generate-btn">Generate CSV</button>
@@ -34,6 +41,7 @@
     const API_BASE = '';
     const urlsInput = document.getElementById('urls-input');
     const generateBtn = document.getElementById('generate-btn');
+    const includeScreenshotsCheckbox = document.getElementById('include-screenshots');
     const progressText = document.getElementById('progress-text');
     const skippedText = document.getElementById('skipped-text');
     const failedText = document.getElementById('failed-text');
@@ -45,7 +53,7 @@
       if (host.endsWith('tiktok.com')) return 'tiktok';
       if (host.endsWith('instagram.com')) return 'instagram';
       if (host.endsWith('spotify.com')) return 'spotify';
-      return null;
+      return 'screenshot'; // Use screenshot endpoint for unsupported URLs
     }
 
     function extractYouTubeVideoId(rawUrl) {
@@ -144,7 +152,7 @@
       return null;
     }
 
-    function parseLinesToIds(lines) {
+    function parseLinesToIds(lines, includeScreenshots = true) {
       let skipped = 0;
       const invalid = [];
       const entries = [];
@@ -166,6 +174,9 @@
           const id = extractYouTubeVideoId(trimmed);
           if (id) {
             entries.push({ platform, id, url: trimmed });
+          } else if (trimmed && includeScreenshots) {
+            // YouTube URL but not a supported video type - use screenshot
+            entries.push({ platform: 'screenshot', id: '', url: trimmed });
           } else if (trimmed) {
             skipped += 1;
             invalid.push(trimmed);
@@ -174,6 +185,9 @@
           const info = extractTikTokInfo(trimmed);
           if (info) {
             entries.push({ platform, id: info.videoId, url: trimmed, channelHandle: info.channelHandle });
+          } else if (trimmed && includeScreenshots) {
+            // TikTok URL but not a supported video type - use screenshot
+            entries.push({ platform: 'screenshot', id: '', url: trimmed });
           } else if (trimmed) {
             skipped += 1;
             invalid.push(trimmed);
@@ -182,6 +196,9 @@
           if (isSupportedInstagramPath(url.pathname)) {
             const shortcode = extractInstagramShortcode(trimmed);
             entries.push({ platform, id: shortcode || '', url: trimmed });
+          } else if (trimmed && includeScreenshots) {
+            // Instagram URL but not a supported path - use screenshot
+            entries.push({ platform: 'screenshot', id: '', url: trimmed });
           } else if (trimmed) {
             skipped += 1;
             invalid.push(trimmed);
@@ -190,10 +207,16 @@
           const info = extractSpotifyInfo(trimmed);
           if (info) {
             entries.push({ platform, id: info.id, url: trimmed, spotifyType: info.type, useChartmetric: info.useChartmetric });
+          } else if (trimmed && includeScreenshots) {
+            // Spotify URL but not a supported type - use screenshot
+            entries.push({ platform: 'screenshot', id: '', url: trimmed });
           } else if (trimmed) {
             skipped += 1;
             invalid.push(trimmed);
           }
+        } else if (platform === 'screenshot' && trimmed && includeScreenshots) {
+          // Use screenshot endpoint for unsupported URLs
+          entries.push({ platform: 'screenshot', id: '', url: trimmed });
         } else if (trimmed) {
           skipped += 1;
           invalid.push(trimmed);
@@ -227,7 +250,8 @@
         'engagement_likeRate',
         'engagement_commentRate',
         'heroImageUrl',
-        'channelHandle'
+        'channelHandle',
+        'links'
       ];
 
       const lines = [header.map(sanitizeCsvValue).join(',')];
@@ -246,7 +270,8 @@
           row.engagement_likeRate ?? '',
           row.engagement_commentRate ?? '',
           row.heroImageUrl ?? '',
-          row.channelHandle ?? ''
+          row.channelHandle ?? '',
+          row.links ?? ''
         ].map(sanitizeCsvValue).join(',');
         lines.push(line);
       }
@@ -286,6 +311,12 @@
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       }
+      if (entry.platform === 'screenshot') {
+        const url = `${API_BASE}/api/screenshot?url=${encodeURIComponent(entry.url)}&meta=1&storage_provider=cloudflare`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }
       throw new Error('Unsupported platform');
     }
 
@@ -295,7 +326,7 @@
       let done = 0;
       let failed = 0;
       const failedUrls = [];
-      const counts = { youtube: 0, tiktok: 0, instagram: 0, spotify: 0 };
+      const counts = { youtube: 0, tiktok: 0, instagram: 0, spotify: 0, screenshot: 0 };
 
       async function next() {
         if (index >= entries.length) return;
@@ -313,6 +344,8 @@
             ok = data && !data.error && typeof data.videoId === 'string' && typeof data.inputUrl === 'string';
           } else if (entry.platform === 'spotify') {
             ok = data && !data.error && typeof data.videoId === 'string';
+          } else if (entry.platform === 'screenshot') {
+            ok = data && data.ok === true;
           }
           if (ok) {
             counts[entry.platform] = (counts[entry.platform] || 0) + 1;
@@ -405,6 +438,30 @@
           continue;
         }
 
+        if (platform === 'screenshot') {
+          // Map screenshot response to CSV format
+          const links = item.pageSignals?.links || [];
+          const linksStr = links.map(link => link.href).join(', ');
+          rows.push({
+            platform: 'screenshot',
+            originalUrl: item.inputUrl || originalUrl,
+            videoId: '',
+            title: item.title ?? '',
+            publishedAt: '',
+            durationIso: '',
+            durationSeconds: '',
+            viewCount: '',
+            likeCount: '',
+            commentCount: '',
+            engagement_likeRate: '',
+            engagement_commentRate: '',
+            heroImageUrl: item.s3_url ?? '',
+            channelHandle: '',
+            links: linksStr
+          });
+          continue;
+        }
+
         // YouTube and Spotify (default - both use same normalized format)
         const engagement = item.engagement || {};
         rows.push({
@@ -421,14 +478,15 @@
           engagement_likeRate: item.engagement_likeRate ?? engagement.likeRate ?? '',
           engagement_commentRate: item.engagement_commentRate ?? engagement.commentRate ?? '',
           heroImageUrl: item.heroImageUrl ?? '',
-          channelHandle: item.channelHandle ?? ''
+          channelHandle: item.channelHandle ?? '',
+          links: ''
         });
       }
       return rows;
     }
 
     function resetUI() {
-      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0)';
+      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0, Screenshot: 0)';
       skippedText.textContent = '';
       failedText.textContent = '';
       downloadLink.style.display = 'none';
@@ -441,10 +499,11 @@
       resetUI();
 
       const lines = urlsInput.value.split(/\r?\n/);
-      const { entries, skipped, invalid } = parseLinesToIds(lines);
+      const includeScreenshots = includeScreenshotsCheckbox.checked;
+      const { entries, skipped, invalid } = parseLinesToIds(lines, includeScreenshots);
 
       if (entries.length === 0) {
-        progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0)';
+        progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0, Screenshot: 0)';
         if (skipped > 0) {
           skippedText.textContent = `Skipped ${skipped} invalid URLs.`;
         }
@@ -456,7 +515,7 @@
         return;
       }
 
-      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0)';
+      progressText.textContent = 'Processed 0 videos (YouTube: 0, TikTok: 0, Instagram: 0, Spotify: 0, Screenshot: 0)';
       if (skipped > 0) {
         skippedText.textContent = `Skipped ${skipped} invalid URLs.`;
       }
@@ -465,8 +524,8 @@
       }
 
       const { results, failed, failedUrls } = await processWithLimit(entries, 5, (done, total, failedCount, counts) => {
-        const totalSuccess = (counts.youtube || 0) + (counts.tiktok || 0) + (counts.instagram || 0) + (counts.spotify || 0);
-        progressText.textContent = `Processed ${totalSuccess} videos (YouTube: ${counts.youtube || 0}, TikTok: ${counts.tiktok || 0}, Instagram: ${counts.instagram || 0}, Spotify: ${counts.spotify || 0})`;
+        const totalSuccess = (counts.youtube || 0) + (counts.tiktok || 0) + (counts.instagram || 0) + (counts.spotify || 0) + (counts.screenshot || 0);
+        progressText.textContent = `Processed ${totalSuccess} videos (YouTube: ${counts.youtube || 0}, TikTok: ${counts.tiktok || 0}, Instagram: ${counts.instagram || 0}, Spotify: ${counts.spotify || 0}, Screenshot: ${counts.screenshot || 0})`;
         if (failedCount > 0) {
           failedText.textContent = `Failed ${failedCount} fetches.`;
         }

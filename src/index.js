@@ -838,231 +838,133 @@ app.get('/api/chartmetric/metadata', async (req, res) => {
   }
 });
 
-// Screenshot endpoint - capture webpage screenshots with anti-detection and block detection
-// Examples:
-//   /api/screenshot?url=https%3A%2F%2Fexample.com
-//   /api/screenshot?url=https%3A%2F%2Fexample.com&download=1
-//   /api/screenshot?url=https%3A%2F%2Fexample.com&fullPage=1
-//   /api/screenshot?url=https%3A%2F%2Fexample.com&meta=1
+// Screenshot endpoint - structured webpage screenshot capture with metadata
 app.get('/api/screenshot', async (req, res) => {
-  const { chromium } = require('playwright');
+  const {
+    createBrowserOrContext,
+    applyAntiDetection,
+    detectBlockPage,
+    waitForPageSettle,
+    collectPageSignals,
+    determineStatus,
+    captureScreenshot,
+    checkRedditMediaComplete
+  } = require('./screenshot-helpers');
+
+  let browser = null;
   let context = null;
   let page = null;
-
-  function detectBlockPage(title, htmlSnippet) {
-    const lowerTitle = (title || '').toLowerCase();
-    const lowerSnippet = (htmlSnippet || '').toLowerCase();
-    const combined = lowerTitle + ' ' + lowerSnippet;
-
-    const blockIndicators = [
-      { pattern: /cloudflare/i, reason: 'cloudflare' },
-      { pattern: /akamai/i, reason: 'akamai' },
-      { pattern: /imperva/i, reason: 'imperva' },
-      { pattern: /incapsula/i, reason: 'incapsula' },
-      { pattern: /datadome/i, reason: 'datadome' },
-      { pattern: /access denied/i, reason: 'generic' },
-      { pattern: /request blocked/i, reason: 'generic' },
-      { pattern: /attention required/i, reason: 'generic' },
-      { pattern: /forbidden/i, reason: 'generic' },
-      { pattern: /not authorized/i, reason: 'generic' },
-      { pattern: /bot detection/i, reason: 'generic' },
-      { pattern: /unusual traffic/i, reason: 'generic' }
-    ];
-
-    for (const { pattern, reason } of blockIndicators) {
-      if (pattern.test(combined)) {
-        return { blocked: true, reason };
-      }
-    }
-
-    return { blocked: false, reason: null };
-  }
+  const timings = { gotoMs: 0, settleMs: 0, screenshotMs: 0, totalMs: 0 };
+  const startTime = Date.now();
 
   try {
-    const { url, download, fullPage, meta, debug } = req.query;
+    const {
+      url,
+      download,
+      fullPage,
+      meta,
+      debug,
+      includeImage,
+      selector,
+      capture,
+      format,
+      quality,
+      profileMode,
+      timeoutMs,
+      storage_provider
+    } = req.query;
+
     const debugMode = debug === '1';
+    const isMetaMode = meta === '1';
+    const shouldIncludeImage = includeImage === '1';
+    const screenshotFormat = format || 'jpeg';
+    const screenshotQuality = quality ? parseInt(quality, 10) : 65;
+    const useFullPage = fullPage === '1';
+    const navigationTimeout = timeoutMs ? parseInt(timeoutMs, 10) : 30000;
+    const usePersistentProfile = profileMode === 'persistent';
+    const shouldUploadToR2 = storage_provider === 'cloudflare';
 
     if (!url) {
-      return res.status(400).json({ error: 'MISSING_URL' });
+      return res.status(400).json({
+        ok: false,
+        error: 'MISSING_URL',
+        message: 'URL parameter is required',
+        inputUrl: null
+      });
     }
 
     let targetUrl;
     try {
       targetUrl = new URL(url);
     } catch (e) {
-      return res.status(400).json({ error: 'INVALID_URL' });
+      return res.status(400).json({
+        ok: false,
+        error: 'INVALID_URL',
+        message: 'Provided URL is malformed',
+        inputUrl: url
+      });
     }
 
     if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
-      return res.status(400).json({ error: 'INVALID_URL_PROTOCOL' });
+      return res.status(400).json({
+        ok: false,
+        error: 'INVALID_URL_PROTOCOL',
+        message: 'URL must use http or https protocol',
+        inputUrl: url
+      });
     }
 
-    const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    const browserSetup = await createBrowserOrContext(usePersistentProfile ? 'persistent' : 'fresh');
+    browser = browserSetup.browser;
+    context = browserSetup.context;
 
-    const path = require('path');
-    const profilePath = path.join(__dirname, '..', 'reddit-profile');
-
-    context = await chromium.launchPersistentContext(profilePath, {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled'
-      ],
-      viewport: { width: 1200, height: 800 },
-      locale: 'en-US',
-      timezoneId: 'America/Los_Angeles',
-      userAgent: userAgent,
-      bypassCSP: true,
-      extraHTTPHeaders: {
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-User': '?1',
-        'Sec-Fetch-Dest': 'document',
-        'Upgrade-Insecure-Requests': '1'
-      }
-    });
-
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined
-      });
-
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5]
-      });
-
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en']
-      });
-
-      window.chrome = {
-        runtime: {}
-      };
-
-      Object.defineProperty(navigator, 'permissions', {
-        get: () => ({
-          query: () => Promise.resolve({ state: 'prompt' })
-        })
-      });
-
-      const originalQuery = window.navigator.permissions.query;
-      window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications' ?
-          Promise.resolve({ state: Notification.permission }) :
-          originalQuery(parameters)
-      );
-
-      Object.defineProperty(navigator, 'platform', {
-        get: () => 'MacIntel'
-      });
-
-      Object.defineProperty(navigator, 'vendor', {
-        get: () => 'Google Inc.'
-      });
-    });
+    await applyAntiDetection(context);
 
     page = await context.newPage();
 
     if (debugMode) {
       page.on('requestfailed', (request) => {
-        const resourceType = request.resourceType();
-        const reqUrl = request.url();
-        const isRedditMedia = reqUrl.includes('redd.it') || reqUrl.includes('redditstatic') || 
-                              reqUrl.includes('external-preview') || reqUrl.includes('preview');
-        
-        if (resourceType === 'image' || isRedditMedia) {
-          console.log('[requestfailed]', resourceType, request.failure()?.errorText || 'unknown', reqUrl);
-        }
+        console.log('[requestfailed]', request.resourceType(), request.failure()?.errorText || 'unknown', request.url());
       });
 
       page.on('response', async (response) => {
-        const respUrl = response.url();
         const status = response.status();
         const contentType = response.headers()['content-type'] || '';
-        const isRedditMedia = respUrl.includes('redd.it') || respUrl.includes('redditstatic') || 
-                              respUrl.includes('external-preview') || respUrl.includes('preview');
-        
-        if (contentType.startsWith('image/') || isRedditMedia) {
-          console.log('[image response]', status, contentType, respUrl);
-          
-          if (status >= 400 || (isRedditMedia && !contentType.startsWith('image/'))) {
-            console.log('[image suspicious]', status, contentType, respUrl);
-          }
+        if (contentType.startsWith('image/') || status >= 400) {
+          console.log('[response]', status, contentType, response.url());
         }
       });
     }
 
-    await page.goto(url, {
-      waitUntil: 'networkidle',
-      timeout: 30000
-    });
-
-    const isReddit = url.toLowerCase().includes('reddit.com');
-    const isInstagram = url.toLowerCase().includes('instagram.com');
-    
-    if (isReddit) {
-      const selectors = [
-        'button:has-text("Accept All")',
-        'button:has-text("Accept all")',
-        'button:has-text("Accept")',
-        'button:has-text("I Agree")',
-        'button:has-text("Continue")',
-        '[aria-label="Close"]',
-        'button[aria-label="Close"]',
-        '[role="dialog"] button:has-text("Not Now")',
-        'button:has-text("Not Now")'
-      ];
-      for (const sel of selectors) {
-        try {
-          const loc = page.locator(sel).first();
-          if (await loc.count() && await loc.isVisible()) {
-            await loc.click({ timeout: 800 }).catch(() => {});
-            await page.waitForTimeout(150);
-          }
-        } catch {}
-      }
-
-      await page.waitForTimeout(400);
-      await page.evaluate(() => window.scrollTo(0, window.innerHeight * 1.5));
-      await page.waitForTimeout(600);
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await page.waitForTimeout(400);
-
-      try {
-        const post = page.locator('shreddit-post, [data-testid="post-container"], main').first();
-        if (await post.count()) await post.scrollIntoViewIfNeeded().catch(() => {});
-      } catch {}
-
-      await page.waitForFunction(() => {
-        const imgs = Array.from(document.images || []);
-        const interesting = imgs.filter(img => {
-          const s = (img.currentSrc || img.src || '').toLowerCase();
-          return s.includes('redd.it') || s.includes('redditstatic') || s.includes('preview') || s.includes('external-preview');
-        });
-        const pool = interesting.length ? interesting : imgs.slice(0, 6);
-        if (!pool.length) return true;
-
-        return pool.every(img => img.complete && img.naturalWidth > 0);
-      }, { timeout: 8000 }).catch(() => {
-        console.log('Reddit images did not fully load within timeout');
+    const gotoStart = Date.now();
+    try {
+      await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: navigationTimeout
       });
-    } else if (isInstagram) {
-      await page.waitForTimeout(2000);
-      
-      await page.evaluate(() => window.scrollTo(0, window.innerHeight * 1.5));
-      await page.waitForTimeout(1500);
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await page.waitForTimeout(2000);
-    } else {
-      await page.waitForTimeout(2000);
+    } catch (error) {
+      if (error.message.includes('Timeout')) {
+        return res.status(504).json({
+          ok: false,
+          error: 'NAVIGATION_TIMEOUT',
+          message: `Navigation timeout after ${navigationTimeout}ms`,
+          inputUrl: url
+        });
+      }
+      return res.status(502).json({
+        ok: false,
+        error: 'NAVIGATION_FAILED',
+        message: error.message,
+        inputUrl: url
+      });
     }
+    timings.gotoMs = Date.now() - gotoStart;
 
-    if (debugMode) {
-      console.log('[final url]', page.url());
-    }
+    const finalUrl = page.url();
+
+    const settleStart = Date.now();
+    await waitForPageSettle(page, url, debugMode);
+    timings.settleMs = Date.now() - settleStart;
 
     let title = null;
     let htmlSnippet = null;
@@ -1071,42 +973,147 @@ app.get('/api/screenshot', async (req, res) => {
       const fullHtml = await page.content();
       htmlSnippet = fullHtml.substring(0, 50000);
     } catch (e) {
-      console.error('Error extracting page metadata:', e);
+      if (debugMode) {
+        console.error('Error extracting page metadata:', e);
+      }
     }
 
     const { blocked, reason } = detectBlockPage(title, htmlSnippet);
+    const pageSignals = await collectPageSignals(page);
+    const status = blocked ? 'blocked' : determineStatus(blocked, pageSignals);
 
-    const screenshotBuffer = await page.screenshot({
-      type: 'jpeg',
-      quality: 65,
-      fullPage: fullPage === '1'
+    const warnings = [];
+    
+    // Check Reddit media completeness
+    const isReddit = url.toLowerCase().includes('reddit.com');
+    if (isReddit) {
+      const redditMediaComplete = await checkRedditMediaComplete(page);
+      if (!redditMediaComplete) {
+        warnings.push('Main reddit media did not fully load before capture');
+      }
+    }
+    
+    if (pageSignals.imageCount > 0) {
+      const loadRate = pageSignals.loadedImageCount / pageSignals.imageCount;
+      if (loadRate < 0.5) {
+        warnings.push(`Only ${Math.round(loadRate * 100)}% of images loaded`);
+      }
+    }
+    if (pageSignals.brokenImageCount > 3) {
+      warnings.push(`${pageSignals.brokenImageCount} broken images detected`);
+    }
+    if (pageSignals.hasVisibleOverlays) {
+      warnings.push(`${pageSignals.visibleOverlayCount} visible overlay(s) may obstruct content`);
+    }
+    if (pageSignals.hasSkeletons) {
+      warnings.push(`${pageSignals.visibleSkeletonCount} skeleton/placeholder element(s) detected`);
+    }
+
+    const screenshotStart = Date.now();
+    const { screenshotBuffer, captureWarning } = await captureScreenshot(page, {
+      format: screenshotFormat,
+      quality: screenshotQuality,
+      fullPage: useFullPage,
+      selector: selector || null
     });
+    timings.screenshotMs = Date.now() - screenshotStart;
+    timings.totalMs = Date.now() - startTime;
 
-    if (meta === '1') {
-      const base64Image = `data:image/jpeg;base64,${screenshotBuffer.toString('base64')}`;
-      return res.json({
-        ok: !blocked,
-        inputUrl: url,
-        blocked: blocked,
-        title: title || null,
-        reason: reason || null,
-        imageBase64: base64Image
-      });
+    if (captureWarning) {
+      warnings.push(captureWarning);
+    }
+
+    const screenshotDimensions = await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight
+    }));
+
+    let s3Url = null;
+    if (shouldUploadToR2) {
+      try {
+        const { uploadToR2 } = require('./r2-storage');
+        const mimeType = screenshotFormat === 'png' ? 'image/png' : screenshotFormat === 'webp' ? 'image/webp' : 'image/jpeg';
+        const extension = screenshotFormat === 'png' ? 'png' : screenshotFormat === 'webp' ? 'webp' : 'jpg';
+        s3Url = await uploadToR2(screenshotBuffer, mimeType, extension);
+        if (debugMode) {
+          console.log('[R2] Screenshot uploaded to:', s3Url);
+        }
+      } catch (error) {
+        console.error('[R2] Upload failed:', error.message);
+        warnings.push(`R2 upload failed: ${error.message}`);
+      }
+    }
+
+    const metadata = {
+      ok: status === 'rendered' || status === 'partial',
+      status,
+      inputUrl: url,
+      finalUrl,
+      title: title || null,
+      blocked,
+      blockReason: reason || null,
+      warnings,
+      renderMode: 'playwright',
+      timings,
+      pageSignals: {
+        anchorCount: pageSignals.anchorCount,
+        links: pageSignals.links,
+        imageCount: pageSignals.imageCount,
+        loadedImageCount: pageSignals.loadedImageCount,
+        brokenImageCount: pageSignals.brokenImageCount,
+        videoCount: pageSignals.videoCount,
+        audioCount: pageSignals.audioCount
+      },
+      screenshot: {
+        format: screenshotFormat,
+        fullPage: useFullPage,
+        width: screenshotDimensions.width,
+        height: screenshotDimensions.height,
+        byteLength: screenshotBuffer.length
+      }
+    };
+
+    if (s3Url) {
+      metadata.s3_url = s3Url;
+    }
+
+    if (debugMode) {
+      metadata.debug = {
+        profileMode: usePersistentProfile ? 'persistent' : 'fresh',
+        navigationTimeout,
+        hasVisibleOverlays: pageSignals.hasVisibleOverlays,
+        hasSkeletons: pageSignals.hasSkeletons
+      };
+    }
+
+    if (isMetaMode) {
+      if (shouldIncludeImage) {
+        const mimeType = screenshotFormat === 'png' ? 'image/png' : screenshotFormat === 'webp' ? 'image/webp' : 'image/jpeg';
+        metadata.imageBase64 = `data:${mimeType};base64,${screenshotBuffer.toString('base64')}`;
+      }
+      return res.json(metadata);
     }
 
     const hostname = targetUrl.hostname.replace(/[^a-z0-9.-]/gi, '_');
     const timestamp = Date.now();
-    const filename = `screenshot-${hostname}-${timestamp}.jpg`;
+    const extension = screenshotFormat === 'png' ? 'png' : screenshotFormat === 'webp' ? 'webp' : 'jpg';
+    const filename = `screenshot-${hostname}-${timestamp}.${extension}`;
     const disposition = download === '1' ? 'attachment' : 'inline';
+    const mimeType = screenshotFormat === 'png' ? 'image/png' : screenshotFormat === 'webp' ? 'image/webp' : 'image/jpeg';
 
     const truncatedTitle = title ? encodeURIComponent(title.substring(0, 120)) : '';
+    const truncatedFinalUrl = encodeURIComponent(finalUrl.substring(0, 200));
 
-    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
+    res.setHeader('X-Screenshot-Status', status);
     res.setHeader('X-Screenshot-Blocked', blocked ? '1' : '0');
     if (truncatedTitle) {
       res.setHeader('X-Screenshot-Title', truncatedTitle);
+    }
+    if (truncatedFinalUrl) {
+      res.setHeader('X-Screenshot-Final-Url', truncatedFinalUrl);
     }
     if (blocked && reason) {
       res.setHeader('X-Screenshot-Block-Reason', encodeURIComponent(reason));
@@ -1115,12 +1122,20 @@ app.get('/api/screenshot', async (req, res) => {
 
   } catch (error) {
     console.error('Screenshot error:', error);
+    
     if (!res.headersSent) {
-      res.status(502).json({ error: 'SCREENSHOT_FAILED' });
+      const errorCode = error.message.includes('screenshot') ? 'SCREENSHOT_CAPTURE_FAILED' : 'INTERNAL_ERROR';
+      return res.status(500).json({
+        ok: false,
+        error: errorCode,
+        message: error.message,
+        inputUrl: req.query.url || null
+      });
     }
   } finally {
     if (page) await page.close().catch(() => {});
     if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
