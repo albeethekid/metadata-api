@@ -961,6 +961,7 @@ app.get('/api/screenshot', async (req, res) => {
     } = req.query;
 
     const debugMode = debug === '1';
+    const debugProxy = req.query.debugProxy === '1';
     const isMetaMode = meta === '1';
     const shouldIncludeImage = includeImage === '1';
     const screenshotFormat = format || 'jpeg';
@@ -969,6 +970,29 @@ app.get('/api/screenshot', async (req, res) => {
     const navigationTimeout = timeoutMs ? parseInt(timeoutMs, 10) : 30000;
     const usePersistentProfile = profileMode === 'persistent';
     const shouldUploadToR2 = storage_provider === 'cloudflare';
+
+    // Parse proxy parameter: defaults to enabled (null), can be disabled with proxy=false or proxy=0
+    let useProxy = null; // null means use default (enabled if credentials exist)
+    if (req.query.proxy !== undefined) {
+      useProxy = req.query.proxy !== 'false' && req.query.proxy !== '0';
+    }
+
+    // Get proxy info for debug output
+    let proxyDebugInfo = null;
+    if (debugProxy) {
+      const { getPlaywrightProxyConfig, isProxyEnabled } = require('./proxy-config');
+      const proxyConfig = getPlaywrightProxyConfig('oxylabs', useProxy);
+      proxyDebugInfo = {
+        proxyEnabled: isProxyEnabled(useProxy),
+        proxyServer: proxyConfig?.server || null,
+        requestedOverride: req.query.proxy || 'default',
+        hasCredentials: !!(
+          process.env.OXYLABS_PROXY_SERVER &&
+          process.env.OXYLABS_USERNAME &&
+          process.env.OXYLABS_PASSWORD
+        )
+      };
+    }
 
     if (!url) {
       return res.status(400).json({
@@ -1000,7 +1024,7 @@ app.get('/api/screenshot', async (req, res) => {
       });
     }
 
-    const browserSetup = await createBrowserOrContext(usePersistentProfile ? 'persistent' : 'fresh');
+    const browserSetup = await createBrowserOrContext(usePersistentProfile ? 'persistent' : 'fresh', useProxy);
     browser = browserSetup.browser;
     context = browserSetup.context;
 
@@ -1049,7 +1073,7 @@ app.get('/api/screenshot', async (req, res) => {
     const finalUrl = page.url();
 
     const settleStart = Date.now();
-    await waitForPageSettle(page, url, debugMode);
+    await waitForPageSettle(page, url, debugMode, useProxy);
     timings.settleMs = Date.now() - settleStart;
 
     let title = null;
@@ -1170,6 +1194,10 @@ app.get('/api/screenshot', async (req, res) => {
         hasVisibleOverlays: pageSignals.hasVisibleOverlays,
         hasSkeletons: pageSignals.hasSkeletons
       };
+    }
+
+    if (debugProxy) {
+      metadata.proxyDebug = proxyDebugInfo;
     }
 
     if (isMetaMode) {

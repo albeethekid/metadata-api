@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 const path = require('path');
 
-async function createBrowserOrContext(profileMode = 'fresh') {
+async function createBrowserOrContext(profileMode = 'fresh', useProxy = null) {
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
   
   const baseArgs = [
@@ -28,6 +28,17 @@ async function createBrowserOrContext(profileMode = 'fresh') {
       'Upgrade-Insecure-Requests': '1'
     }
   };
+
+  // Add proxy configuration if available
+  if (useProxy !== false) {
+    const { getPlaywrightProxyConfig, isProxyEnabled } = require('./proxy-config');
+    const proxyConfig = getPlaywrightProxyConfig('oxylabs', useProxy);
+    
+    if (proxyConfig && isProxyEnabled(useProxy)) {
+      baseOptions.proxy = proxyConfig;
+      console.log('[Screenshot] Using proxy:', proxyConfig.server);
+    }
+  }
 
   if (profileMode === 'persistent') {
     const profilePath = path.join(__dirname, '..', 'reddit-profile');
@@ -477,26 +488,33 @@ async function handleInstagramPage(page, debugMode = false) {
   if (debugMode) console.log('[Instagram] Page settle complete');
 }
 
-async function handleTikTokPage(page, debugMode = false) {
+async function handleTikTokPage(page, debugMode = false, useProxy = null) {
   if (debugMode) console.log('[TikTok] Starting page settle');
   
+  // Check if proxy is being used - increases latency
+  const { isProxyEnabled } = require('./proxy-config');
+  const proxyActive = isProxyEnabled(useProxy);
+  
+  // Increase timeouts when using proxy due to higher latency
+  const timeoutMultiplier = proxyActive ? 2 : 1;
+  
   // Set page timeout to prevent long waits
-  page.setDefaultTimeout(10000);
+  page.setDefaultTimeout(10000 * timeoutMultiplier);
   
   // Initial wait for page structure
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(2000 * timeoutMultiplier);
   
   // Scroll down to trigger lazy-loaded images
   if (debugMode) console.log('[TikTok] Scrolling to trigger lazy loading');
   await page.evaluate(() => window.scrollTo(0, window.innerHeight * 2));
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(1500 * timeoutMultiplier);
   
   // Scroll back up
   await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(1500 * timeoutMultiplier);
   
   // Wait for images to load
-  if (debugMode) console.log('[TikTok] Waiting for images to load');
+  if (debugMode) console.log('[TikTok] Waiting for images to load' + (proxyActive ? ' (proxy mode - extended wait)' : ''));
   try {
     await page.waitForFunction(() => {
       const images = document.querySelectorAll('img');
@@ -507,13 +525,13 @@ async function handleTikTokPage(page, debugMode = false) {
         }
       });
       return images.length === 0 || loadedCount > 0;
-    }, { timeout: 3000 });
+    }, { timeout: 3000 * timeoutMultiplier });
   } catch (e) {
     if (debugMode) console.log('[TikTok] Image wait timed out');
   }
   
   // Final wait
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1000 * timeoutMultiplier);
   
   if (debugMode) console.log('[TikTok] Page settle complete');
 }
@@ -522,7 +540,7 @@ async function handleGenericPage(page) {
   await page.waitForTimeout(1000);
 }
 
-async function waitForPageSettle(page, url, debugMode = false) {
+async function waitForPageSettle(page, url, debugMode = false, useProxy = null) {
   const isReddit = url.toLowerCase().includes('reddit.com');
   const isInstagram = url.toLowerCase().includes('instagram.com');
   const isTikTok = url.toLowerCase().includes('tiktok.com');
@@ -532,7 +550,7 @@ async function waitForPageSettle(page, url, debugMode = false) {
   } else if (isInstagram) {
     await handleInstagramPage(page, debugMode);
   } else if (isTikTok) {
-    await handleTikTokPage(page, debugMode);
+    await handleTikTokPage(page, debugMode, useProxy);
   } else {
     await handleGenericPage(page);
   }
