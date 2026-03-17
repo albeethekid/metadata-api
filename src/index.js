@@ -1176,6 +1176,35 @@ app.get('/', (req, res) => {
   });
 });
 
+// Debug endpoint to verify proxy configuration
+app.get('/api/proxy/status', (req, res) => {
+  const { getPlaywrightProxyConfig, isProxyEnabled } = require('./proxy-config');
+  
+  const useProxy = req.query.proxy !== undefined 
+    ? req.query.proxy !== 'false' && req.query.proxy !== '0'
+    : null;
+  
+  const proxyConfig = getPlaywrightProxyConfig('oxylabs', useProxy);
+  
+  const hasCredentials = !!(
+    process.env.OXYLABS_PROXY_SERVER &&
+    process.env.OXYLABS_USERNAME &&
+    process.env.OXYLABS_PASSWORD
+  );
+  
+  res.json({
+    proxyEnabled: isProxyEnabled(useProxy),
+    hasCredentials: hasCredentials,
+    proxyServer: proxyConfig?.server || null,
+    requestedOverride: req.query.proxy || 'default',
+    message: proxyConfig 
+      ? 'Proxy is configured and will be used'
+      : hasCredentials 
+        ? 'Proxy credentials exist but proxy is disabled via parameter'
+        : 'Proxy credentials not configured'
+  });
+});
+
 if (require.main === module) {
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server running on port ${port}`);
