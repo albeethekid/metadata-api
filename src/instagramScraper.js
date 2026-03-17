@@ -1,4 +1,6 @@
 const { chromium } = require('playwright');
+const { getPlaywrightProxyConfig, isProxyEnabled } = require('./proxy-config');
+
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
 
@@ -162,15 +164,23 @@ async function getBrowser() {
   return browserInstance;
 }
 
-async function createContext(browser, mode) {
+async function createContext(browser, mode, proxyConfig = null) {
   const isMobile = mode === 'mobile';
-  return browser.newContext({
+  const contextOptions = {
     userAgent: isMobile ? MOBILE_UA : DESKTOP_UA,
     viewport: isMobile ? { width: 390, height: 844 } : { width: 1920, height: 1080 },
     locale: 'en-US',
     timezoneId: 'UTC',
     extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' }
-  });
+  };
+
+  // Add proxy configuration if provided
+  if (proxyConfig) {
+    contextOptions.proxy = proxyConfig;
+    console.log('[Instagram] Using proxy:', proxyConfig.server);
+  }
+
+  return browser.newContext(contextOptions);
 }
 
 /**
@@ -201,7 +211,16 @@ async function scrapeInstagramPost(url, opts = {}) {
   const fast = (opts.fast != null) ? !!opts.fast : !debug;
   const noMobile = !!opts.no_mobile;
   const maxWaitMs = (opts.maxWaitMs != null ? Number(opts.maxWaitMs) : null);
+  const useProxy = opts.useProxy !== undefined ? opts.useProxy : null; // null = default (enabled if creds exist)
   const startedAt = Date.now();
+  
+  // Get proxy configuration with runtime override
+  const proxyConfig = getPlaywrightProxyConfig('oxylabs', useProxy);
+  if (isProxyEnabled(useProxy) && proxyConfig) {
+    console.log('[Instagram] Proxy enabled for request');
+  } else if (useProxy === false) {
+    console.log('[Instagram] Proxy explicitly disabled for request');
+  }
   const rb = (def) => {
     if (!Number.isFinite(maxWaitMs)) return def;
     const rem = maxWaitMs - (Date.now() - startedAt);
@@ -233,7 +252,7 @@ async function scrapeInstagramPost(url, opts = {}) {
   
   try {
     // Create new context and page for each request
-    context = await createContext(browser, 'desktop');
+    context = await createContext(browser, 'desktop', proxyConfig);
 
     // Block heavy resource types (allow CSS/JS/HTML)
     await context.route('**/*', (route) => {
@@ -346,7 +365,7 @@ async function scrapeInstagramPost(url, opts = {}) {
       if (context) await context.close();
 
       const capturedJson2 = capturedJson;
-      context = await createContext(browser, 'mobile');
+      context = await createContext(browser, 'mobile', proxyConfig);
       await context.route('**/*', (route) => {
         const type = route.request().resourceType();
         if (!debug && (type === 'image' || type === 'media' || type === 'font')) return route.abort();

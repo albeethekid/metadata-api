@@ -277,6 +277,12 @@ app.get('/api/instagram/video', async (req, res) => {
   const { url } = req.query;
   const debug = (req.query.debug === '1') || (req.query.verbose === '1');
   const acceptHeader = (req.headers && req.headers.accept) || '';
+  
+  // Parse proxy parameter: defaults to enabled (null), can be disabled with proxy=false or proxy=0
+  let useProxy = null; // null means use default (enabled if credentials exist)
+  if (req.query.proxy !== undefined) {
+    useProxy = req.query.proxy !== 'false' && req.query.proxy !== '0';
+  }
 
   if (!url) {
     return res.status(400).json({
@@ -297,7 +303,7 @@ app.get('/api/instagram/video', async (req, res) => {
   }
 
   try {
-    const scrapedData = await scrapeInstagramPost(parsedUrl.decodedUrl, { debug });
+    const scrapedData = await scrapeInstagramPost(parsedUrl.decodedUrl, { debug, useProxy });
 
     const response = {
       platform: "instagram",
