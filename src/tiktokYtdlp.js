@@ -117,13 +117,28 @@ async function getYtDlpInstance() {
   }
 }
 
-async function getTikTokVideoMetricsYtdlp(encodedUrl, verbose = false) {
+async function getTikTokVideoMetricsYtdlp(encodedUrl, verbose = false, useProxy = null) {
   const { decodedUrl, videoId } = normalizeUrl(encodedUrl);
   
   try {
     const ytDlpWrap = await getYtDlpInstance();
     
-    const metadata = await ytDlpWrap.getVideoInfo(decodedUrl);
+    // Build yt-dlp options with proxy if enabled
+    const options = [];
+    
+    // Add proxy configuration if available
+    if (useProxy !== false) {
+      const { getAxiosProxyConfig, isProxyEnabled } = require('./proxy-config');
+      const proxyConfig = getAxiosProxyConfig('oxylabs', useProxy);
+      
+      if (proxyConfig && isProxyEnabled(useProxy)) {
+        const proxyUrl = `${proxyConfig.protocol}://${proxyConfig.auth.username}:${proxyConfig.auth.password}@${proxyConfig.host}:${proxyConfig.port}`;
+        options.push('--proxy', proxyUrl);
+        console.log('[TikTok yt-dlp] Using proxy:', `${proxyConfig.protocol}://${proxyConfig.host}:${proxyConfig.port}`);
+      }
+    }
+    
+    const metadata = await ytDlpWrap.getVideoInfo(decodedUrl, options);
     
     return formatResponse(decodedUrl, videoId, metadata, verbose);
   } catch (error) {

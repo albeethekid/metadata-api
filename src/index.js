@@ -223,13 +223,42 @@ app.get('/api/channel/:channelId', async (req, res) => {
 app.get('/api/tiktok/video/metrics', async (req, res) => {
   const { url } = req.query;
   const verbose = req.query.verbose === '1';
+  const debugProxy = req.query.debugProxy === '1';
+
+  // Parse proxy parameter: defaults to enabled (null), can be disabled with proxy=false or proxy=0
+  let useProxy = null; // null means use default (enabled if credentials exist)
+  if (req.query.proxy !== undefined) {
+    useProxy = req.query.proxy !== 'false' && req.query.proxy !== '0';
+  }
+
+  // Get proxy info for debug output
+  let proxyDebugInfo = null;
+  if (debugProxy) {
+    const { getAxiosProxyConfig, isProxyEnabled } = require('./proxy-config');
+    const proxyConfig = getAxiosProxyConfig('oxylabs', useProxy);
+    proxyDebugInfo = {
+      proxyEnabled: isProxyEnabled(useProxy),
+      proxyServer: proxyConfig ? `${proxyConfig.protocol}://${proxyConfig.host}:${proxyConfig.port}` : null,
+      requestedOverride: req.query.proxy || 'default',
+      hasCredentials: !!(
+        process.env.OXYLABS_PROXY_SERVER &&
+        process.env.OXYLABS_USERNAME &&
+        process.env.OXYLABS_PASSWORD
+      )
+    };
+  }
 
   if (!url) {
     return res.status(400).json({ error: 'MISSING_URL' });
   }
 
   try {
-    const payload = await getTikTokVideoMetrics(url, verbose);
+    const payload = await getTikTokVideoMetrics(url, verbose, useProxy);
+    
+    if (debugProxy) {
+      payload.proxyDebug = proxyDebugInfo;
+    }
+    
     res.json(payload);
   } catch (error) {
     if (error instanceof TikTokMetricsError) {
@@ -245,13 +274,42 @@ app.get('/api/tiktok/video/metrics', async (req, res) => {
 app.get('/api/tiktok/ytdlp', async (req, res) => {
   const { url } = req.query;
   const verbose = req.query.verbose === '1';
+  const debugProxy = req.query.debugProxy === '1';
+
+  // Parse proxy parameter: defaults to enabled (null), can be disabled with proxy=false or proxy=0
+  let useProxy = null; // null means use default (enabled if credentials exist)
+  if (req.query.proxy !== undefined) {
+    useProxy = req.query.proxy !== 'false' && req.query.proxy !== '0';
+  }
+
+  // Get proxy info for debug output
+  let proxyDebugInfo = null;
+  if (debugProxy) {
+    const { getAxiosProxyConfig, isProxyEnabled } = require('./proxy-config');
+    const proxyConfig = getAxiosProxyConfig('oxylabs', useProxy);
+    proxyDebugInfo = {
+      proxyEnabled: isProxyEnabled(useProxy),
+      proxyServer: proxyConfig ? `${proxyConfig.protocol}://${proxyConfig.host}:${proxyConfig.port}` : null,
+      requestedOverride: req.query.proxy || 'default',
+      hasCredentials: !!(
+        process.env.OXYLABS_PROXY_SERVER &&
+        process.env.OXYLABS_USERNAME &&
+        process.env.OXYLABS_PASSWORD
+      )
+    };
+  }
 
   if (!url) {
     return res.status(400).json({ error: 'MISSING_URL' });
   }
 
   try {
-    const payload = await getTikTokVideoMetricsYtdlp(url, verbose);
+    const payload = await getTikTokVideoMetricsYtdlp(url, verbose, useProxy);
+    
+    if (debugProxy) {
+      payload.proxyDebug = proxyDebugInfo;
+    }
+    
     res.json(payload);
   } catch (error) {
     if (error instanceof TikTokYtdlpError) {

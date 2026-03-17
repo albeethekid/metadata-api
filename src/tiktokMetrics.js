@@ -11,9 +11,9 @@ class TikTokMetricsError extends Error {
   }
 }
 
-async function getTikTokVideoMetrics(encodedUrl, verbose = false) {
+async function getTikTokVideoMetrics(encodedUrl, verbose = false, useProxy = null) {
   const { decodedUrl, videoId } = normalizeUrl(encodedUrl);
-  const html = await fetchTikTokHtml(decodedUrl);
+  const html = await fetchTikTokHtml(decodedUrl, useProxy);
   const embeddedJson = extractEmbeddedJson(html);
   const video = resolveVideoObject(embeddedJson, videoId);
 
@@ -49,16 +49,31 @@ function normalizeUrl(encodedUrl) {
   return { decodedUrl: parsed.toString(), videoId };
 }
 
-async function fetchTikTokHtml(url) {
+async function fetchTikTokHtml(url, useProxy = null) {
+  const fetchOptions = {
+    method: 'GET',
+    headers: {
+      'User-Agent': USER_AGENT,
+      'Accept-Language': ACCEPT_LANGUAGE
+    }
+  };
+
+  // Add proxy configuration if available
+  if (useProxy !== false) {
+    const { getAxiosProxyConfig, isProxyEnabled } = require('./proxy-config');
+    const proxyConfig = getAxiosProxyConfig('oxylabs', useProxy);
+    
+    if (proxyConfig && isProxyEnabled(useProxy)) {
+      const HttpsProxyAgent = require('https-proxy-agent');
+      const proxyUrl = `${proxyConfig.protocol}://${proxyConfig.auth.username}:${proxyConfig.auth.password}@${proxyConfig.host}:${proxyConfig.port}`;
+      fetchOptions.agent = new HttpsProxyAgent(proxyUrl);
+      console.log('[TikTok] Using proxy:', `${proxyConfig.protocol}://${proxyConfig.host}:${proxyConfig.port}`);
+    }
+  }
+
   let response;
   try {
-    response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept-Language': ACCEPT_LANGUAGE
-      }
-    });
+    response = await fetch(url, fetchOptions);
   } catch (error) {
     throw new TikTokMetricsError(502, 'PAGE_FETCH_FAILED');
   }
