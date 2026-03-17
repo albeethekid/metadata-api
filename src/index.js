@@ -276,12 +276,30 @@ app.get('/api/tiktok/ytdlp', async (req, res) => {
 app.get('/api/instagram/video', async (req, res) => {
   const { url } = req.query;
   const debug = (req.query.debug === '1') || (req.query.verbose === '1');
+  const debugProxy = req.query.debugProxy === '1';
   const acceptHeader = (req.headers && req.headers.accept) || '';
   
   // Parse proxy parameter: defaults to enabled (null), can be disabled with proxy=false or proxy=0
   let useProxy = null; // null means use default (enabled if credentials exist)
   if (req.query.proxy !== undefined) {
     useProxy = req.query.proxy !== 'false' && req.query.proxy !== '0';
+  }
+  
+  // Get proxy info for debug output
+  let proxyDebugInfo = null;
+  if (debugProxy) {
+    const { getPlaywrightProxyConfig, isProxyEnabled } = require('./proxy-config');
+    const proxyConfig = getPlaywrightProxyConfig('oxylabs', useProxy);
+    proxyDebugInfo = {
+      proxyEnabled: isProxyEnabled(useProxy),
+      proxyServer: proxyConfig?.server || null,
+      requestedOverride: req.query.proxy || 'default',
+      hasCredentials: !!(
+        process.env.OXYLABS_PROXY_SERVER &&
+        process.env.OXYLABS_USERNAME &&
+        process.env.OXYLABS_PASSWORD
+      )
+    };
   }
 
   if (!url) {
@@ -333,6 +351,10 @@ app.get('/api/instagram/video', async (req, res) => {
 
     if (debug) {
       response.debug = debugObj;
+    }
+    
+    if (debugProxy) {
+      response.proxyDebug = proxyDebugInfo;
     }
 
     return res.json(response);
