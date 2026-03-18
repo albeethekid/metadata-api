@@ -110,6 +110,44 @@ function renderInstagramDebugHtml(payload) {
   }
 });
 
+app.get('/api/search/channels', async (req, res) => {
+  try {
+    const { q, maxResults = 10 } = req.query;
+    const verbose = req.query.verbose === '1';
+    
+    if (!q) {
+      return res.status(400).json({ error: 'Query parameter "q" is required' });
+    }
+    
+    const results = await youtubeClient.searchChannels(q, parseInt(maxResults));
+    
+    // Return full data if verbose mode
+    if (verbose) {
+      return res.json(results);
+    }
+    
+    // Simplified response by default
+    const simplified = results.map(item => {
+      const channelId = item.id.channelId;
+      const handle = item.handle;
+      
+      return {
+        channelName: item.snippet.title,
+        channelUrl: handle ? `https://www.youtube.com/${handle}` : `https://www.youtube.com/channel/${channelId}`,
+        channelHandle: handle || null,
+        thumbnailUrl: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.medium?.url || item.snippet.thumbnails.default?.url,
+        description: item.snippet.description,
+        subscriberCount: item.statistics?.subscriberCount || null,
+        videoCount: item.statistics?.videoCount || null
+      };
+    });
+    
+    res.json(simplified);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/video/:videoId', async (req, res) => {
   try {
     const { videoId } = req.params;
@@ -1257,13 +1295,15 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Social Media Metadata API Server',
     ui: {
-      csvGenerator: '/csv.html (Batch process URLs and download CSV)'
+      csvGenerator: '/csv.html (Batch process URLs and download CSV)',
+      channelSearch: '/channels.html (YouTube channel search CSV export)'
     },
     endpoints: {
       chartmetric: '/api/chartmetric/metadata?url=<SPOTIFY_URL>&verbose=1 (Spotify tracks, albums, artists, playlists - includes streaming data)',
       spotify: '/api/spotify/metadata?url=<SPOTIFY_URL>&verbose=1 (Spotify shows, episodes - use Chartmetric for tracks/albums/artists/playlists)',
       video: '/api/video/:videoId?verbose=1 (YouTube video metadata)',
-      search: '/api/search?q=query&maxResults=10 (YouTube search)',
+      search: '/api/search?q=query&maxResults=10 (YouTube video search)',
+      searchChannels: '/api/search/channels?q=query&maxResults=10 (YouTube channel search)',
       channelVideos: '/api/channel/:channelId/videos?maxResults=10',
       trending: '/api/trending?regionCode=US&maxResults=10',
       videoComments: '/api/video/:videoId/comments?maxResults=20',

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube Channel Search CSV</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; }
+    h1 { margin-bottom: 8px; }
+    input[type="text"] { width: 100%; padding: 12px; box-sizing: border-box; font-size: 14px; }
+    input[type="number"] { width: 100px; padding: 8px; font-size: 14px; }
+    button { padding: 10px 16px; font-size: 14px; cursor: pointer; margin-top: 12px; }
+    .row { margin: 12px 0; }
+    .status { margin-top: 8px; font-size: 14px; color: #444; }
+    #download-link { display: none; margin-top: 12px; }
+    .muted { color: #666; font-size: 13px; }
+    label { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>YouTube Channel Search CSV</h1>
+  <p class="muted">Search for YouTube channels and export results as CSV</p>
+  
+  <div class="row">
+    <label for="query-input">Search Query</label><br />
+    <input type="text" id="query-input" placeholder="e.g., bluey, mr beast, gaming channels" />
+    <p class="muted">Returns up to 50 channels (YouTube API maximum)</p>
+  </div>
+  
+  <div class="row">
+    <button id="generate-btn">Generate CSV</button>
+  </div>
+  
+  <div class="status" id="progress-text"></div>
+  <a id="download-link" href="#" download>Download CSV</a>
+
+  <script>
+    const API_BASE = '';
+    const queryInput = document.getElementById('query-input');
+    const generateBtn = document.getElementById('generate-btn');
+    const progressText = document.getElementById('progress-text');
+    const downloadLink = document.getElementById('download-link');
+    const MAX_RESULTS = 50; // Always use YouTube API maximum
+
+    function sanitizeCsvValue(value) {
+      if (value === null || value === undefined) return '""';
+      let str = String(value);
+      if (/^[=+\-@]/.test(str)) {
+        str = `'${str}`;
+      }
+      str = str.replace(/"/g, '""');
+      return `"${str}"`;
+    }
+
+    function buildCsv(channels) {
+      const header = [
+        'channelName',
+        'channelUrl',
+        'channelHandle',
+        'thumbnailUrl',
+        'description',
+        'subscriberCount',
+        'videoCount'
+      ];
+
+      const lines = [header.map(sanitizeCsvValue).join(',')];
+      for (const channel of channels) {
+        const line = [
+          channel.channelName || '',
+          channel.channelUrl || '',
+          channel.channelHandle || '',
+          channel.thumbnailUrl || '',
+          channel.description || '',
+          channel.subscriberCount || '',
+          channel.videoCount || ''
+        ].map(sanitizeCsvValue).join(',');
+        lines.push(line);
+      }
+      return lines.join('\n');
+    }
+
+    function createFilename(query) {
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const sanitizedQuery = query.replace(/[^a-z0-9]/gi, '-').toLowerCase().substring(0, 30);
+      return `youtube-channels-${sanitizedQuery}-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
+    }
+
+    async function fetchChannels(query, maxResults) {
+      const url = `${API_BASE}/api/search/channels?q=${encodeURIComponent(query)}&maxResults=${maxResults}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      return res.json();
+    }
+
+    function resetUI() {
+      progressText.textContent = '';
+      downloadLink.style.display = 'none';
+      downloadLink.href = '#';
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      const query = queryInput.value.trim();
+
+      if (!query) {
+        progressText.textContent = 'Please enter a search query.';
+        progressText.style.color = '#d00';
+        return;
+      }
+
+      generateBtn.disabled = true;
+      generateBtn.textContent = 'Searching...';
+      resetUI();
+      progressText.style.color = '#444';
+
+      try {
+        progressText.textContent = `Searching for "${query}"...`;
+        const channels = await fetchChannels(query, MAX_RESULTS);
+
+        if (!channels || channels.length === 0) {
+          progressText.textContent = 'No channels found.';
+          progressText.style.color = '#d00';
+          generateBtn.disabled = false;
+          generateBtn.textContent = 'Generate CSV';
+          return;
+        }
+
+        progressText.textContent = `Found ${channels.length} channel${channels.length === 1 ? '' : 's'}. Generating CSV...`;
+
+        const csv = buildCsv(channels);
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        downloadLink.href = url;
+        downloadLink.download = createFilename(query);
+        downloadLink.style.display = 'inline-block';
+
+        progressText.textContent = `Successfully generated CSV with ${channels.length} channel${channels.length === 1 ? '' : 's'}.`;
+        progressText.style.color = '#080';
+      } catch (error) {
+        progressText.textContent = `Error: ${error.message}`;
+        progressText.style.color = '#d00';
+        console.error('Channel search error:', error);
+      } finally {
+        generateBtn.disabled = false;
+        generateBtn.textContent = 'Generate CSV';
+      }
+    });
+
+    // Allow Enter key to trigger search
+    queryInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        generateBtn.click();
+      }
+    });
+  </script>
+</body>
+</html>

@@ -32,6 +32,54 @@ class YouTubeClient {
     }
   }
 
+  async searchChannels(query, maxResults = 10) {
+    try {
+      const response = await this.youtube.search.list({
+        part: 'snippet',
+        q: query,
+        type: 'channel',
+        maxResults: maxResults,
+        order: 'relevance'
+      });
+      
+      const channels = response.data.items;
+      
+      // Fetch statistics for each channel to get subscriber counts
+      const channelIds = channels.map(item => item.id.channelId).join(',');
+      
+      if (channelIds) {
+        const statsResponse = await this.youtube.channels.list({
+          part: 'statistics,snippet',
+          id: channelIds
+        });
+        
+        // Map statistics and handle back to channels
+        const statsMap = {};
+        const handleMap = {};
+        statsResponse.data.items.forEach(item => {
+          statsMap[item.id] = item.statistics;
+          handleMap[item.id] = item.snippet?.customUrl || item.snippet?.handle || null;
+        });
+        
+        // Augment channels with statistics and handle
+        channels.forEach(channel => {
+          const channelId = channel.id.channelId;
+          if (statsMap[channelId]) {
+            channel.statistics = statsMap[channelId];
+          }
+          if (handleMap[channelId]) {
+            channel.handle = handleMap[channelId];
+          }
+        });
+      }
+      
+      return channels;
+    } catch (error) {
+      console.error('Error searching channels:', error.message);
+      throw error;
+    }
+  }
+
   async getVideoDetails(videoId) {
     try {
       const response = await this.youtube.videos.list({
