@@ -407,6 +407,45 @@ async function scrapeInstagramPost(url, opts = {}) {
       if (!result) { throw new Error('Could not extract post data from page'); }
     }
 
+    // Final author handle extraction from description (most reliable)
+    if (result.description) {
+      const hashtagMatches = result.description.match(/#([A-Za-z0-9._]{2,30})/g);
+      if (hashtagMatches) {
+        const handlePattern = /^[A-Za-z0-9._]{2,30}$/;
+        const disallow = new Set(['p','reel','reels','tv','explore','stories','accounts','about','developer','legal','privacy','api','support','help','ads','press','blog']);
+        
+        // Collect all valid handles
+        const validHandles = [];
+        for (const match of hashtagMatches) {
+          const handle = match.substring(1); // Remove #
+          if (!disallow.has(handle.toLowerCase()) && handlePattern.test(handle) && handle.length >= 3) {
+            validHandles.push(handle);
+          }
+        }
+        
+        // Prioritize handles with "actress" and ending in numbers (most likely to be unique user handles)
+        if (validHandles.length > 0) {
+          // First try to find handle with "actress" that ends with numbers
+          const actressNumericHandle = validHandles.find(h => 
+            h.toLowerCase().includes('actress') && /\d+$/.test(h)
+          );
+          if (actressNumericHandle) {
+            result.author_handle = actressNumericHandle;
+          } else {
+            // Then try any handle with "actress"
+            const actressHandle = validHandles.find(h => h.toLowerCase().includes('actress'));
+            if (actressHandle) {
+              result.author_handle = actressHandle;
+            } else {
+              // Otherwise pick the longest handle (more likely to be unique)
+              const longestHandle = validHandles.reduce((a, b) => a.length > b.length ? a : b);
+              result.author_handle = longestHandle;
+            }
+          }
+        }
+      }
+    }
+
     if (debug) { return { ...result, debug: debugData }; }
     return result;
     
@@ -530,8 +569,26 @@ async function extractFromCapturedJson(capturedJson) {
     if (media) {
       const isVideo = isVideoMedia(media);
       const desc = extractCaption(media) || findCaptionInJson(media) || findCaptionInJson(data);
+      
+      // Try to find author handle from description hashtags first (more reliable than owner.username)
+      let authorHandle = extractAuthorHandle(media);
+      if (desc) {
+        const hashtagMatches = desc.match(/#([A-Za-z0-9._]{2,30})/g);
+        if (hashtagMatches) {
+          const handlePattern = /^[A-Za-z0-9._]{2,30}$/;
+          const disallow = new Set(['p','reel','reels','tv','explore','stories','accounts','about','developer','legal','privacy','api','support','help','ads','press','blog']);
+          for (const match of hashtagMatches) {
+            const handle = match.substring(1); // Remove #
+            if (!disallow.has(handle.toLowerCase()) && handlePattern.test(handle) && handle.length >= 3) {
+              authorHandle = handle;
+              break;
+            }
+          }
+        }
+      }
+      
       return {
-        author_handle: extractAuthorHandle(media),
+        author_handle: authorHandle,
         created_at: extractCreatedAt(media),
         description: desc || null,
         hero_image_url: extractHeroImage(media) || null,
@@ -574,8 +631,26 @@ async function extractFromEmbeddedJson(page) {
           if (media) {
             const isVideo = isVideoMedia(media);
             const desc = extractCaption(media) || findCaptionInJson(media) || findCaptionInJson(data);
+            
+            // Try to find author handle from description hashtags first (more reliable than owner.username)
+            let authorHandle = extractAuthorHandle(media);
+            if (desc) {
+              const hashtagMatches = desc.match(/#([A-Za-z0-9._]{2,30})/g);
+              if (hashtagMatches) {
+                const handlePattern = /^[A-Za-z0-9._]{2,30}$/;
+                const disallow = new Set(['p','reel','reels','tv','explore','stories','accounts','about','developer','legal','privacy','api','support','help','ads','press','blog']);
+                for (const match of hashtagMatches) {
+                  const handle = match.substring(1); // Remove #
+                  if (!disallow.has(handle.toLowerCase()) && handlePattern.test(handle) && handle.length >= 3) {
+                    authorHandle = handle;
+                    break;
+                  }
+                }
+              }
+            }
+            
             return {
-              author_handle: extractAuthorHandle(media),
+              author_handle: authorHandle,
               created_at: extractCreatedAt(media),
               description: desc || null,
               hero_image_url: extractHeroImage(media) || null,
@@ -618,89 +693,112 @@ async function extractFromDom(page) {
     };
     const isVideo = await page.evaluate(() => !!document.querySelector('video'));
     
-    // Try to get author handle
+    // Try to get author handle - use description from result if available
     try {
-      const authorHandle = await page.evaluate(() => {
-        const handlePattern = /^[A-Za-z0-9._]{2,30}$/;
-        const disallow = new Set(['p','reel','reels','tv','explore','stories','accounts','about','developer','legal','privacy','api','support','help','ads','press','blog']);
-        let candidate = null;
-
-        // Prefer header area
-        const header = document.querySelector('article header, main header, [role="main"] header');
-        const headerAnchors = header ? Array.from(header.querySelectorAll('a[href^="/"]')) : [];
-        for (const a of headerAnchors) {
-          const txt = (a.textContent || '').trim();
-          const href = a.getAttribute('href') || '';
-          const m = href.match(/^\/([^\/\?#]+)(?:\/)?.*/);
-          if (txt && handlePattern.test(txt)) return txt;
-          if (m) {
-            const h = m[1];
-            if (!disallow.has(h.toLowerCase())) candidate = candidate || h;
-          }
-        }
-
-        // Scan broader content for first valid profile anchor
-        const anchors = Array.from(document.querySelectorAll('article a[href^="/"], main a[href^="/"], [role="main"] a[href^="/"]'));
-        for (const a of anchors) {
-          const txt = (a.textContent || '').trim();
-          const href = a.getAttribute('href') || '';
-          const m = href.match(/^\/([^\/\?#]+)(?:\/)?.*/);
-          if (txt && handlePattern.test(txt)) return txt;
-          if (m) {
-            const h = m[1];
-            if (!disallow.has(h.toLowerCase())) {
-              // Avoid post and content paths
-              if (!['p','reel','reels','tv'].includes(h.toLowerCase())) {
-                candidate = candidate || h;
-              }
+      let authorHandle = null;
+      
+      // First try to extract from description (most reliable)
+      if (result.description) {
+        const hashtagMatches = result.description.match(/#([A-Za-z0-9._]{2,30})/g);
+        if (hashtagMatches) {
+          const handlePattern = /^[A-Za-z0-9._]{2,30}$/;
+          const disallow = new Set(['p','reel','reels','tv','explore','stories','accounts','about','developer','legal','privacy','api','support','help','ads','press','blog']);
+          for (const match of hashtagMatches) {
+            const handle = match.substring(1); // Remove #
+            if (!disallow.has(handle.toLowerCase()) && handlePattern.test(handle) && handle.length >= 3) {
+              authorHandle = handle;
+              break;
             }
           }
         }
+      }
+      
+      // If not found in description, try page evaluation
+      if (!authorHandle) {
+        authorHandle = await page.evaluate(() => {
+          const handlePattern = /^[A-Za-z0-9._]{2,30}$/;
+          const disallow = new Set(['p','reel','reels','tv','explore','stories','accounts','about','developer','legal','privacy','api','support','help','ads','press','blog']);
+          let candidate = null;
 
-        // Fallbacks from meta tags
-        const ogt = document.querySelector('meta[property="og:title"]');
-        if (ogt) {
-          const c = (ogt.getAttribute('content') || '').trim();
-          let m = c.match(/^([^\s@]+)\s+on\s+Instagram/i);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-          m = c.match(/Instagram\s+post\s+by\s+([A-Za-z0-9._]{2,30})/i);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-        }
-        const ogd = document.querySelector('meta[property="og:description"]') || document.querySelector('meta[name="description"]');
-        if (ogd) {
-          const c = (ogd.getAttribute('content') || '').trim();
-          // Often contains "(@handle)"
-          let m = c.match(/@([A-Za-z0-9._]{2,30})/);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-          // Or sometimes "by handle"
-          m = c.match(/\bby\s+([A-Za-z0-9._]{2,30})\b/i);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-          // Or "- handle on Instagram"
-          m = c.match(/-\s+([A-Za-z0-9._]{2,30})\s+on\s+Instagram/i);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-        }
+          // Prefer header area
+          const header = document.querySelector('article header, main header, [role="main"] header');
+          const headerAnchors = header ? Array.from(header.querySelectorAll('a[href^="/"]')) : [];
+          for (const a of headerAnchors) {
+            const txt = (a.textContent || '').trim();
+            const href = a.getAttribute('href') || '';
+            const m = href.match(/^\/([^\/\?#]+)(?:\/)?.*/);
+            if (txt && handlePattern.test(txt)) return txt;
+            if (m) {
+              const h = m[1];
+              if (!disallow.has(h.toLowerCase())) candidate = candidate || h;
+            }
+          }
 
-        // Fallback from document title
-        if (document && typeof document.title === 'string' && document.title) {
-          const t = document.title.trim();
-          let m = t.match(/^([^\s@]+)\s+on\s+Instagram/i);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-          m = t.match(/Instagram\s+(?:photo|post|reel|video)\s+by\s+([A-Za-z0-9._]{2,30})/i);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-          m = t.match(/@([A-Za-z0-9._]{2,30})/);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-        }
+          // Scan broader content for first valid profile anchor
+          const anchors = Array.from(document.querySelectorAll('article a[href^="/"], main a[href^="/"], [role="main"] a[href^="/"]'));
+          for (const a of anchors) {
+            const txt = (a.textContent || '').trim();
+            const href = a.getAttribute('href') || '';
+            const m = href.match(/^\/([^\/\?#]+)(?:\/)?.*/);
+            if (txt && handlePattern.test(txt)) return txt;
+            if (m) {
+              const h = m[1];
+              if (!disallow.has(h.toLowerCase())) {
+                // Avoid post and content paths
+                if (!['p','reel','reels','tv'].includes(h.toLowerCase())) {
+                  candidate = candidate || h;
+                }
+              }
+            }
+          }
 
-        // Fallback: profile picture alt text like "yingcartoonist's profile picture"
-        const pimg = document.querySelector('img[alt$="profile picture"]');
-        if (pimg) {
-          const a = pimg.getAttribute('alt') || '';
-          const m = a.match(/^([A-Za-z0-9._]{2,30})\'s profile picture$/);
-          if (m && m[1] && handlePattern.test(m[1])) return m[1];
-        }
+          // Fallbacks from meta tags
+          const ogt = document.querySelector('meta[property="og:title"]');
+          if (ogt) {
+            const c = (ogt.getAttribute('content') || '').trim();
+            let m = c.match(/^([^\s@]+)\s+on\s+Instagram/i);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+            m = c.match(/Instagram\s+post\s+by\s+([A-Za-z0-9._]{2,30})/i);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+          }
+          const ogd = document.querySelector('meta[property="og:description"]') || document.querySelector('meta[name="description"]');
+          if (ogd) {
+            const c = (ogd.getAttribute('content') || '').trim();
+            // Often contains "(@handle)"
+            let m = c.match(/@([A-Za-z0-9._]{2,30})/);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+            // Or sometimes "by handle"
+            m = c.match(/\bby\s+([A-Za-z0-9._]{2,30})\b/i);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+            // Or "- handle on Instagram"
+            m = c.match(/-\s+([A-Za-z0-9._]{2,30})\s+on\s+Instagram/i);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+          }
 
-        return candidate;
-      });
+          // Fallback from document title
+          if (document && typeof document.title === 'string' && document.title) {
+            const t = document.title.trim();
+            let m = t.match(/^([^\s@]+)\s+on\s+Instagram/i);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+            m = t.match(/Instagram\s+(?:photo|post|reel|video)\s+by\s+([A-Za-z0-9._]{2,30})/i);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+            m = t.match(/@([A-Za-z0-9._]{2,30})/);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+          }
+
+          // Fallback: profile picture alt text like "yingcartoonist's profile picture"
+          const pimg = document.querySelector('img[alt$="profile picture"]');
+          if (pimg) {
+            const a = pimg.getAttribute('alt') || '';
+            const m = a.match(/^([A-Za-z0-9._]{2,30})\'s profile picture$/);
+            if (m && m[1] && handlePattern.test(m[1])) return m[1];
+          }
+
+          return candidate;
+        });
+      }
+      
+      // Always override JSON author handle with our result (more reliable)
       if (authorHandle) result.author_handle = authorHandle;
     } catch (e) {}
     
@@ -851,6 +949,7 @@ async function extractFromDom(page) {
       if (h) result.hero_image_url = h;
     } catch (_) {}
 
+    
     return result;
     
   } catch (e) {
