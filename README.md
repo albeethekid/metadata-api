@@ -216,6 +216,85 @@ Includes `heroImageUrls` and `raw` TikTok item object.
 - Video not found in JSON: 404 { "error": "VIDEO_NOT_FOUND" }
 - Unexpected error: 500 { "error": "INTERNAL_ERROR" }
 
+### GET /api/instagram/video?url=<INSTAGRAM_URL>
+
+Fetches normalized metadata for Instagram posts by scraping the public page and extracting embedded data.
+
+#### Supported Instagram URLs
+
+- **Posts**: `https://www.instagram.com/p/{shortcode}/`
+- **Reels**: `https://www.instagram.com/reel/{shortcode}/`
+- **TV**: `https://www.instagram.com/tv/{shortcode}/`
+
+#### Example
+
+GET /api/instagram/video?url=https://www.instagram.com/p/CgtXoBxr_FU/
+
+#### Default response
+
+```json
+{
+  "platform": "instagram",
+  "inputUrl": "https://www.instagram.com/p/CgtXoBxr_FU/",
+  "videoId": "CgtXoBxr_FU",
+  "publishedAt": "2022-08-01T07:44:21.000Z",
+  "description": "BLACKPINK AI Version 💖 😍 They are so pretty 😍\n\n#JISOO #지수 #블랙핑크지수 #블랙핑크 #김지수 #ygstage #ygactress #yg #actressjisoo #actresskimjisoo #kimjisoo #blackpinkjisoo #jisooblackpink #jisoosnowdrop #blackpink #blackpinkedit #jisooedit #blackpinkinyourarea #Lisoo #Chaesoo #Jensoo #Jennie #Lisa #Rośe #actressjisoo24",
+  "authorHandle": "actressjisoo24",
+  "heroImageUrl": "https://scontent-gru2-1.cdninstagram.com/v/t51.29350-15/296685005_375951118019173_1915861710552891075_n.webp?stp=c216.0.648.648a_dst-jpg_e35_s640x640_tt6&_nc_cat=111&ccb=7-5&_nc_sid=18de74&efg=eyJlZmdfdGFnIjoiQ0FST1VTUVMfSVRFTS5iZXN0X2ltYWdlX3VybGdlbi5DQzMiJ9&_nc_ohc=aLoTdBS0SygQ7kNvwFRls5v&_nc_oc=AdpATLmIebkhmqxyr_Pj1SzTXSStNiOYcm1GWGDvf_WRSUSUSQ7VlJlm1ZgBm48vCc&_nc_zt=23&_nc_ht=scontent-gru2-1.cdninstagram.com&_nc_gid=SggdoQ9UyoJT33liMF04HQ&_nc_ss=7a30f&oh=00_AfzYwAjrV3DOb03M1tgcZf8P9EMa6FWf99N2lNed0lSLNA&oe=69C2265C",
+  "metrics": {
+    "views": null,
+    "likes": 49,
+    "comments": 1,
+    "shares": null
+  }
+}
+```
+
+#### Verbose response (verbose=1)
+
+Includes `debug` object with screenshots and captured data.
+
+#### Implementation notes
+
+- **Authentication**: No authentication required (scrapes public page)
+- **Author Handle**: Extracted from description hashtags using smart prioritization
+- **Proxy Support**: Configurable via proxy parameter
+- **Error behavior**: Similar to TikTok endpoint
+
+### GET /api/search/channels?q=<QUERY>[&maxResults=50][&verbose=1]
+
+Searches for YouTube channels by query with subscriber counts and video statistics.
+
+#### Parameters
+
+- `q`: Search query (required)
+- `maxResults`: Maximum results (default: 10, max: 50)
+- `verbose`: Return full API response when set to 1
+
+#### Example
+
+GET /api/search/channels?q=blackpink&maxResults=5
+
+#### Default response
+
+```json
+[
+  {
+    "channelName": "BLACKPINK",
+    "channelUrl": "https://www.youtube.com/blackpinkofficial",
+    "channelHandle": "blackpinkofficial",
+    "thumbnailUrl": "https://yt3.ggpht.com/...",
+    "description": "Official BLACKPINK YouTube Channel",
+    "subscriberCount": 92500000,
+    "videoCount": 485
+  }
+]
+```
+
+#### Verbose response (verbose=1)
+
+Returns the raw YouTube Data API response with additional fields.
+
 ## UI: Social Media Metadata → CSV Tool
 
 ### URL
@@ -227,6 +306,27 @@ Includes `heroImageUrls` and `raw` TikTok item object.
 A simple browser-based tool that allows users to:
 
 - Paste a list of YouTube, TikTok, Instagram, or Spotify URLs (one per line)
+
+### URL
+
+/channels.html
+
+### Description
+
+A YouTube channel search tool that exports results as CSV. Features:
+
+- Search YouTube channels by query
+- Fixed maximum of 50 results (YouTube API limit)
+- Includes subscriber count, video count, and channel handles
+- Direct CSV download with properly formatted data
+
+#### Example Usage
+
+1. Enter search query (e.g., "blackpink")
+2. Click "Generate CSV" 
+3. Download the generated CSV file
+
+The tool automatically uses the maximum 50 results to provide comprehensive channel data.
 - Detect platform and extract IDs/handles from valid links
 - Call the appropriate API endpoint for each URL (Chartmetric for Spotify tracks/albums/artists/playlists, Spotify API for shows/episodes)
 - Download a CSV containing unified, normalized metadata
