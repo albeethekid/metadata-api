@@ -19,7 +19,7 @@ jobs:
       - name: Push to GitLab
         run: |
           git remote add gitlab https://oauth2:${GITLAB_TOKEN}@gitlab.com/vermillio/sales-eng/metadata-api.git
-          git push gitlab --all
+          git push --force gitlab main
           git push gitlab --tags
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
