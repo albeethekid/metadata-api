@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>YouTube Channel Search CSV</title>
+  <title>Channel Search CSV</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; }
     h1 { margin-bottom: 8px; }
@@ -18,13 +18,13 @@
   </style>
 </head>
 <body>
-  <h1>YouTube Channel Search CSV</h1>
-  <p class="muted">Search for YouTube channels and export results as CSV</p>
+  <h1>Channel Search CSV</h1>
+  <p class="muted">Search YouTube, TikTok, and Instagram profiles and export results as CSV</p>
   
   <div class="row">
     <label for="query-input">Search Query</label><br />
     <input type="text" id="query-input" placeholder="e.g., bluey, mr beast, gaming channels" />
-    <p class="muted">Returns up to 50 channels (YouTube API maximum)</p>
+    <p class="muted">Returns YouTube (up to 50) + TikTok + Instagram results</p>
   </div>
   
   <div class="row">
@@ -54,6 +54,7 @@
 
     function buildCsv(channels) {
       const header = [
+        'platform',
         'channelName',
         'channelUrl',
         'channelHandle',
@@ -66,6 +67,7 @@
       const lines = [header.map(sanitizeCsvValue).join(',')];
       for (const channel of channels) {
         const line = [
+          channel.platform || '',
           channel.channelName || '',
           channel.channelUrl || '',
           channel.channelHandle || '',
@@ -83,7 +85,7 @@
       const now = new Date();
       const pad = (n) => String(n).padStart(2, '0');
       const sanitizedQuery = query.replace(/[^a-z0-9]/gi, '-').toLowerCase().substring(0, 30);
-      return `youtube-channels-${sanitizedQuery}-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
+      return `channels-${sanitizedQuery}-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
     }
 
     async function fetchChannels(query, maxResults) {
@@ -91,6 +93,24 @@
       const res = await fetch(url);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      return res.json();
+    }
+
+    async function fetchTikTokProfiles(query) {
+      const url = `${API_BASE}/api/tiktok/profiles?query=${encodeURIComponent(query)}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`TikTok HTTP ${res.status}: ${res.statusText}`);
+      }
+      return res.json();
+    }
+
+    async function fetchInstagramProfiles(query) {
+      const url = `${API_BASE}/api/instagram/profiles?query=${encodeURIComponent(query)}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`Instagram HTTP ${res.status}: ${res.statusText}`);
       }
       return res.json();
     }
@@ -117,7 +137,23 @@
 
       try {
         progressText.textContent = `Searching for "${query}"...`;
-        const channels = await fetchChannels(query, MAX_RESULTS);
+
+        const [youtubeChannels, tiktokProfiles, instagramProfiles] = await Promise.all([
+          fetchChannels(query, MAX_RESULTS),
+          fetchTikTokProfiles(query),
+          fetchInstagramProfiles(query)
+        ]);
+
+        const channels = [];
+        for (const c of (Array.isArray(youtubeChannels) ? youtubeChannels : [])) {
+          channels.push({ platform: 'YouTube', ...c });
+        }
+        for (const c of (Array.isArray(tiktokProfiles) ? tiktokProfiles : [])) {
+          channels.push({ platform: 'TikTok', ...c });
+        }
+        for (const c of (Array.isArray(instagramProfiles) ? instagramProfiles : [])) {
+          channels.push({ platform: 'Instagram', ...c });
+        }
 
         if (!channels || channels.length === 0) {
           progressText.textContent = 'No channels found.';

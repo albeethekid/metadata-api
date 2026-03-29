@@ -368,6 +368,317 @@ app.get('/api/tiktok/ytdlp', async (req, res) => {
   }
 });
 
+app.get('/api/instagram/profiles', async (req, res) => {
+  const query = (req.query.query || '').toString().trim();
+  const ensembleKey = process.env.ENSEMBLE_DATA_API_KEY;
+  const apifyKey = process.env.APIFY_API_KEY;
+
+  if (!query) {
+    return res.status(400).json({ error: 'MISSING_QUERY' });
+  }
+
+  if (!ensembleKey) {
+    return res.status(503).json({ error: 'ENSEMBLE_DATA_API_KEY_NOT_CONFIGURED' });
+  }
+
+  if (!apifyKey) {
+    return res.status(503).json({ error: 'APIFY_API_KEY_NOT_CONFIGURED' });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
+
+  try {
+    const fetch = require('node-fetch');
+
+    // 1) Discover profiles via EnsembleData search
+    const ensembleUrl = new URL('https://ensembledata.com/apis/instagram/search');
+    ensembleUrl.searchParams.set('text', query);
+    ensembleUrl.searchParams.set('token', ensembleKey);
+
+    const ensembleResp = await fetch(ensembleUrl.toString(), { signal: controller.signal });
+    const ensembleText = await ensembleResp.text();
+    let ensembleBody = null;
+    try { ensembleBody = ensembleText ? JSON.parse(ensembleText) : null; } catch (_) { ensembleBody = null; }
+
+    if (!ensembleResp.ok) {
+      return res.status(502).json({ error: 'ENSEMBLEDATA_REQUEST_FAILED', status: ensembleResp.status, detail: ensembleBody || ensembleText });
+    }
+
+    const users = Array.isArray(ensembleBody?.data?.users) ? ensembleBody.data.users : [];
+    const discovered = [];
+    for (const u of users) {
+      const userData = u?.user || u;
+      const username = (userData?.username || '').toString().trim();
+      if (!username) continue;
+      discovered.push({
+        username,
+        full_name: userData?.full_name ?? null,
+        profile_pic_url: userData?.profile_pic_url ?? null
+      });
+    }
+
+    // Dedupe while preserving order
+    const seen = new Set();
+    const profiles = [];
+    for (const p of discovered) {
+      const key = p.username.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      profiles.push(p);
+    }
+
+    const usernamesBatch = profiles.map(p => p.username).filter(Boolean).slice(0, 50);
+    if (usernamesBatch.length === 0) {
+      return res.json([]);
+    }
+
+    // 2) Enrich via Apify actor run (REST API)
+    const actorId = 'apify/instagram-profile-scraper';
+    const runUrl = new URL(`https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs`);
+    runUrl.searchParams.set('token', apifyKey);
+    runUrl.searchParams.set('waitForFinish', '120');
+
+    const runResp = await fetch(runUrl.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: usernamesBatch }),
+      signal: controller.signal
+    });
+    const runText = await runResp.text();
+    let runBody = null;
+    try { runBody = runText ? JSON.parse(runText) : null; } catch (_) { runBody = null; }
+
+    if (!runResp.ok) {
+      return res.status(502).json({ error: 'APIFY_RUN_FAILED', status: runResp.status, detail: runBody || runText });
+    }
+
+    const datasetId = runBody?.data?.defaultDatasetId || runBody?.defaultDatasetId || null;
+    if (!datasetId) {
+      return res.status(502).json({ error: 'APIFY_NO_DATASET_ID', detail: runBody || null });
+    }
+
+    const itemsUrl = new URL(`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items`);
+    itemsUrl.searchParams.set('token', apifyKey);
+    itemsUrl.searchParams.set('clean', 'true');
+    itemsUrl.searchParams.set('format', 'json');
+
+    const itemsResp = await fetch(itemsUrl.toString(), { signal: controller.signal });
+    const itemsText = await itemsResp.text();
+    let itemsBody = null;
+    try { itemsBody = itemsText ? JSON.parse(itemsText) : []; } catch (_) { itemsBody = []; }
+
+    if (!itemsResp.ok) {
+      return res.status(502).json({ error: 'APIFY_DATASET_FAILED', status: itemsResp.status, detail: itemsText });
+    }
+
+    const enrichByUsername = new Map();
+    if (Array.isArray(itemsBody)) {
+      for (const item of itemsBody) {
+        const u = (item?.username || '').toString().trim();
+        if (!u) continue;
+        enrichByUsername.set(u.toLowerCase(), item);
+      }
+    }
+
+    // 3) Merge + normalize
+    const out = profiles.slice(0, usernamesBatch.length).map((p) => {
+      const enriched = enrichByUsername.get(p.username.toLowerCase()) || null;
+      const bio = enriched?.biography ?? enriched?.bio ?? null;
+      const followers = enriched?.followersCount ?? enriched?.followers ?? enriched?.followers_count ?? null;
+      const thumb = enriched?.profilePicUrl ?? enriched?.profile_pic_url ?? p.profile_pic_url ?? null;
+      const fullName = p.full_name ?? enriched?.fullName ?? enriched?.full_name ?? null;
+
+      return {
+        channelName: fullName || null,
+        channelUrl: `https://www.instagram.com/${p.username}/`,
+        channelHandle: p.username,
+        thumbnailUrl: thumb || null,
+        description: bio || null,
+        subscriberCount: (typeof followers === 'number' ? followers : (Number.isFinite(Number(followers)) ? Number(followers) : null)),
+        videoCount: null
+      };
+    });
+
+    return res.json(out);
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return res.status(504).json({ error: 'TIMEOUT' });
+    }
+    console.error('Unexpected Instagram profiles error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR' });
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
+app.get('/api/tiktok/profiles', async (req, res) => {
+  const query = (req.query.query || '').toString().trim();
+  const ensembleKey = process.env.ENSEMBLE_DATA_API_KEY;
+  const cursorRaw = req.query.cursor != null ? parseInt(req.query.cursor, 10) : 0;
+  const cursor = Number.isFinite(cursorRaw) && cursorRaw >= 0 ? cursorRaw : 0;
+  const maxResultsRaw = req.query.maxResults != null ? parseInt(req.query.maxResults, 10) : 50;
+  const maxResults = Number.isFinite(maxResultsRaw) ? Math.min(100, Math.max(1, maxResultsRaw)) : 50;
+  const thumbnailMode = (req.query.thumbnail || '').toString().trim().toLowerCase();
+  const screenshotRaw = (req.query.screenshot || '').toString().trim().toLowerCase();
+  const screenshotDisabled = screenshotRaw === '0' || screenshotRaw === 'false';
+  const useScreenshotThumbnail = (
+    thumbnailMode !== 'avatar' &&
+    !screenshotDisabled &&
+    req.query.useScreenshotThumbnail !== '0' &&
+    req.query.useScreenshotThumbnail !== 'false'
+  );
+
+  if (!query) {
+    return res.status(400).json({ error: 'MISSING_QUERY' });
+  }
+
+  if (!ensembleKey) {
+    return res.status(503).json({ error: 'ENSEMBLE_DATA_API_KEY_NOT_CONFIGURED' });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), useScreenshotThumbnail ? 1800000 : 120000);
+
+  try {
+    const fetch = require('node-fetch');
+
+    const allUsers = [];
+    let nextCursor = cursor;
+    let hasMore = true;
+
+    for (let page = 0; page < 20; page += 1) {
+      const ensembleUrl = new URL('https://ensembledata.com/apis/tt/user/search');
+      ensembleUrl.searchParams.set('keyword', query);
+      ensembleUrl.searchParams.set('cursor', String(nextCursor));
+      ensembleUrl.searchParams.set('token', ensembleKey);
+
+      const resp = await fetch(ensembleUrl.toString(), { signal: controller.signal });
+      const text = await resp.text();
+      let body = null;
+      try { body = text ? JSON.parse(text) : null; } catch (_) { body = null; }
+
+      if (!resp.ok) {
+        return res.status(502).json({ error: 'ENSEMBLEDATA_REQUEST_FAILED', status: resp.status, detail: body || text });
+      }
+
+      const users = Array.isArray(body?.data?.users) ? body.data.users : [];
+      if (users.length === 0) break;
+      allUsers.push(...users);
+
+      const reportedHasMore = body?.data?.has_more ?? body?.data?.hasMore;
+      hasMore = typeof reportedHasMore === 'boolean' ? reportedHasMore : (users.length > 0);
+
+      const reportedCursor = body?.data?.cursor ?? body?.data?.next_cursor ?? body?.data?.nextCursor;
+      const newCursor = Number.isFinite(Number(reportedCursor)) ? Number(reportedCursor) : (nextCursor + users.length);
+      if (!hasMore) break;
+      if (newCursor === nextCursor) break;
+      nextCursor = newCursor;
+
+      if (allUsers.length >= maxResults) break;
+    }
+
+    const users = allUsers.slice(0, maxResults);
+    const out = [];
+    const seen = new Set();
+
+    const host = req.get('host');
+    const protocol = req.protocol;
+
+    for (const u of users) {
+      const info = u?.user_info || u?.userInfo || u?.user || u;
+      const username = (info?.unique_id || info?.uniqueId || '').toString().trim();
+      if (!username) continue;
+
+      const key = username.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const nickname = info?.nickname ?? null;
+      const signature = info?.signature ?? null;
+      const avatar = info?.avatar_uri ?? info?.avatarUri ?? info?.profile_pic_url ?? info?.profilePicUrl ?? null;
+      const followers = info?.follower_count ?? info?.followers ?? info?.followers_count ?? null;
+
+      const profileUrl = `https://www.tiktok.com/@${username}/`;
+      let thumbnailUrl = avatar || null;
+      if (useScreenshotThumbnail) {
+        thumbnailUrl = `${protocol}://${host}/api/screenshot?url=${encodeURIComponent(profileUrl)}`;
+      } else if (thumbnailUrl && typeof thumbnailUrl === 'string') {
+        const trimmed = thumbnailUrl.trim();
+        if (trimmed.startsWith('//')) {
+          thumbnailUrl = `https:${trimmed}`;
+        } else if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+          thumbnailUrl = `https://p16.tiktokcdn.com/${trimmed.replace(/^\/+/, '')}`;
+        } else {
+          thumbnailUrl = trimmed;
+        }
+      }
+
+      out.push({
+        channelName: nickname || null,
+        channelUrl: profileUrl,
+        channelHandle: username,
+        thumbnailUrl,
+        description: signature || null,
+        subscriberCount: (typeof followers === 'number' ? followers : (Number.isFinite(Number(followers)) ? Number(followers) : null)),
+        videoCount: null
+      });
+    }
+
+    if (useScreenshotThumbnail) {
+      const fetch = require('node-fetch');
+      const failures = [];
+      for (let i = 0; i < out.length; i += 1) {
+        const item = out[i];
+        const profileUrl = item.channelUrl;
+        try {
+          const screenshotMetaUrl = new URL(`${protocol}://${host}/api/screenshot`);
+          screenshotMetaUrl.searchParams.set('url', profileUrl);
+          screenshotMetaUrl.searchParams.set('meta', '1');
+          screenshotMetaUrl.searchParams.set('storage_provider', 'cloudflare');
+          screenshotMetaUrl.searchParams.set('format', 'jpeg');
+          screenshotMetaUrl.searchParams.set('quality', '65');
+          screenshotMetaUrl.searchParams.set('timeoutMs', '30000');
+
+          const metaResp = await fetch(screenshotMetaUrl.toString(), { signal: controller.signal });
+          const metaText = await metaResp.text();
+          let metaBody = null;
+          try { metaBody = metaText ? JSON.parse(metaText) : null; } catch (_) { metaBody = null; }
+
+          if (metaResp.ok && metaBody && metaBody.s3_url) {
+            item.thumbnailUrl = metaBody.s3_url;
+          } else {
+            item.thumbnailUrl = null;
+            failures.push({ channelHandle: item.channelHandle, channelUrl: item.channelUrl });
+          }
+        } catch (e) {
+          item.thumbnailUrl = null;
+          failures.push({ channelHandle: item.channelHandle, channelUrl: item.channelUrl });
+          console.warn('TikTok screenshot thumbnail failed for', profileUrl, e?.message || e);
+        }
+      }
+
+      if (failures.length > 0) {
+        return res.status(502).json({
+          error: 'SCREENSHOT_UPLOAD_FAILED',
+          message: 'Failed to upload screenshots for one or more profiles. Check /api/screenshot and R2 configuration.',
+          failures
+        });
+      }
+    }
+
+    return res.json(out);
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return res.status(504).json({ error: 'TIMEOUT' });
+    }
+    console.error('Unexpected TikTok profiles error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR' });
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
 // Instagram endpoint for scraping post metrics
 app.get('/api/instagram/video', async (req, res) => {
   const { url } = req.query;
@@ -1311,6 +1622,8 @@ app.get('/', (req, res) => {
       playlist: '/api/playlist/:playlistId?maxResults=50',
       tiktok: '/api/tiktok/video/metrics?url=<URL_ENCODED_TIKTOK_URL>',
       tiktokYtdlp: '/api/tiktok/ytdlp?url=<URL_ENCODED_TIKTOK_URL> (uses yt-dlp)',
+      tiktokProfiles: '/api/tiktok/profiles?query=<SEARCH_TERM> (EnsembleData discovery)',
+      instagramProfiles: '/api/instagram/profiles?query=<SEARCH_TERM> (EnsembleData discovery + Apify enrichment)',
       instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>',
       screenshot: '/api/screenshot?url=<URL_ENCODED_URL>&download=1&fullPage=1'
     },
