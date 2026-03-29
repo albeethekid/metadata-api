@@ -26,6 +26,14 @@
     <input type="text" id="query-input" placeholder="e.g., bluey, mr beast, gaming channels" />
     <p class="muted">Returns YouTube (up to 50) + TikTok + Instagram results</p>
   </div>
+
+  <div class="row">
+    <label>
+      <input type="checkbox" id="tiktok-screenshots" checked />
+      Use TikTok screenshot thumbnails
+    </label>
+    <p class="muted">If unchecked, we won't store screenshots for the profiles (faster)</p>
+  </div>
   
   <div class="row">
     <button id="generate-btn">Generate CSV</button>
@@ -40,6 +48,7 @@
     const generateBtn = document.getElementById('generate-btn');
     const progressText = document.getElementById('progress-text');
     const downloadLink = document.getElementById('download-link');
+    const tiktokScreenshotsCheckbox = document.getElementById('tiktok-screenshots');
     const MAX_RESULTS = 50; // Always use YouTube API maximum
 
     function sanitizeCsvValue(value) {
@@ -97,8 +106,9 @@
       return res.json();
     }
 
-    async function fetchTikTokProfiles(query) {
-      const url = `${API_BASE}/api/tiktok/profiles?query=${encodeURIComponent(query)}`;
+    async function fetchTikTokProfiles(query, useScreenshots) {
+      const screenshotParam = useScreenshots ? '' : '&screenshot=0';
+      const url = `${API_BASE}/api/tiktok/profiles?query=${encodeURIComponent(query)}${screenshotParam}`;
       const res = await fetch(url);
       if (!res.ok) {
         throw new Error(`TikTok HTTP ${res.status}: ${res.statusText}`);
@@ -138,9 +148,11 @@
       try {
         progressText.textContent = `Searching for "${query}"...`;
 
+        const useTikTokScreenshots = !!tiktokScreenshotsCheckbox.checked;
+
         const [youtubeChannels, tiktokProfiles, instagramProfiles] = await Promise.all([
           fetchChannels(query, MAX_RESULTS),
-          fetchTikTokProfiles(query),
+          fetchTikTokProfiles(query, useTikTokScreenshots),
           fetchInstagramProfiles(query)
         ]);
 
