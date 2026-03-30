@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Screenshot Tool</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; max-width: 800px; }
+    h1 { margin-bottom: 8px; }
+    textarea { width: 100%; padding: 10px; box-sizing: border-box; font-size: 13px; font-family: monospace; resize: vertical; border: 1px solid #ccc; border-radius: 3px; }
+    button { padding: 10px 20px; font-size: 14px; cursor: pointer; margin-top: 12px; background: #1a73e8; color: #fff; border: none; border-radius: 4px; }
+    button:disabled { background: #aaa; cursor: default; }
+    .row { margin: 14px 0; }
+    .status { margin-top: 10px; font-size: 14px; color: #444; }
+    .muted { color: #666; font-size: 13px; }
+    label { font-weight: bold; }
+    #result-box { display: none; margin-top: 16px; padding: 14px; background: #f0f7ff; border: 1px solid #acd; border-radius: 4px; }
+    #result-box a { word-break: break-all; color: #1a73e8; }
+    #result-box .copy-btn { padding: 4px 10px; font-size: 12px; margin-left: 8px; background: #555; color: #fff; border: none; border-radius: 3px; cursor: pointer; vertical-align: middle; }
+    #download-link { display: none; margin-top: 12px; color: #1a73e8; font-weight: bold; text-decoration: none; }
+    #download-link:hover { text-decoration: underline; }
+    .progress-bar-wrap { margin-top: 10px; background: #eee; border-radius: 4px; height: 8px; width: 100%; display: none; }
+    .progress-bar { height: 8px; background: #1a73e8; border-radius: 4px; width: 0%; transition: width 0.2s; }
+    .error-list { margin-top: 10px; font-size: 13px; color: #a00; }
+  </style>
+</head>
+<body>
+  <h1>Screenshot Tool</h1>
+  <p class="muted">Paste one or more URLs (one per line). Screenshots are uploaded to cloud storage and a public URL is returned.</p>
+
+  <div class="row">
+    <label for="url-input">URLs</label><br />
+    <textarea id="url-input" rows="6" placeholder="https://example.com&#10;https://another-site.com&#10;..."></textarea>
+  </div>
+
+  <div class="row">
+    <label>
+      <input type="checkbox" id="full-page" />
+      Full page screenshot
+    </label>
+  </div>
+
+  <button id="submit-btn">Take Screenshot</button>
+
+  <div class="progress-bar-wrap" id="progress-wrap">
+    <div class="progress-bar" id="progress-bar"></div>
+  </div>
+  <div class="status" id="status-text"></div>
+
+  <div id="result-box">
+    <strong>Screenshot URL:</strong><br />
+    <a id="result-link" href="#" target="_blank"></a>
+    <button class="copy-btn" id="copy-btn">Copy</button>
+  </div>
+
+  <a id="download-link" href="#" download>Download CSV</a>
+  <div class="error-list" id="error-list"></div>
+
+  <script>
+    const API_BASE = '';
+    const urlInput = document.getElementById('url-input');
+    const submitBtn = document.getElementById('submit-btn');
+    const statusText = document.getElementById('status-text');
+    const resultBox = document.getElementById('result-box');
+    const resultLink = document.getElementById('result-link');
+    const copyBtn = document.getElementById('copy-btn');
+    const downloadLink = document.getElementById('download-link');
+    const errorList = document.getElementById('error-list');
+    const progressWrap = document.getElementById('progress-wrap');
+    const progressBar = document.getElementById('progress-bar');
+    const fullPageCheckbox = document.getElementById('full-page');
+
+    function resetUI() {
+      statusText.textContent = '';
+      statusText.style.color = '#444';
+      resultBox.style.display = 'none';
+      resultLink.href = '#';
+      resultLink.textContent = '';
+      downloadLink.style.display = 'none';
+      downloadLink.href = '#';
+      errorList.textContent = '';
+      progressWrap.style.display = 'none';
+      progressBar.style.width = '0%';
+    }
+
+    function sanitizeCsvValue(value) {
+      if (value === null || value === undefined) return '""';
+      let str = String(value);
+      if (/^[=+\-@]/.test(str)) str = `'${str}`;
+      str = str.replace(/"/g, '""');
+      return `"${str}"`;
+    }
+
+    async function takeScreenshot(url) {
+      const params = new URLSearchParams({
+        url,
+        meta: '1',
+        storage_provider: 'cloudflare',
+        format: 'jpeg',
+        quality: '65',
+        timeoutMs: '30000'
+      });
+      if (fullPageCheckbox.checked) params.set('fullPage', '1');
+
+      const res = await fetch(`${API_BASE}/api/screenshot?${params.toString()}`);
+      const body = await res.json();
+      if (!res.ok) {
+        throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+      }
+      const screenshotUrl = body?.s3_url || null;
+      if (!screenshotUrl) {
+        throw new Error('No s3_url in response');
+      }
+      return screenshotUrl;
+    }
+
+    function createFilename() {
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      return `screenshots-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
+    }
+
+    submitBtn.addEventListener('click', async () => {
+      const raw = urlInput.value.trim();
+      if (!raw) {
+        statusText.textContent = 'Please enter at least one URL.';
+        statusText.style.color = '#d00';
+        return;
+      }
+
+      const urls = raw.split('\n').map(u => u.trim()).filter(u => u.length > 0);
+      if (urls.length === 0) {
+        statusText.textContent = 'No valid URLs found.';
+        statusText.style.color = '#d00';
+        return;
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Working...';
+      resetUI();
+
+      if (urls.length === 1) {
+        // Single URL — show result inline
+        statusText.textContent = 'Taking screenshot...';
+        try {
+          const screenshotUrl = await takeScreenshot(urls[0]);
+          resultLink.href = screenshotUrl;
+          resultLink.textContent = screenshotUrl;
+          resultBox.style.display = 'block';
+          statusText.textContent = 'Done.';
+          statusText.style.color = '#080';
+        } catch (err) {
+          statusText.textContent = `Error: ${err.message}`;
+          statusText.style.color = '#d00';
+        }
+      } else {
+        // Multiple URLs — process serially, download CSV
+        progressWrap.style.display = 'block';
+        const rows = [['originalUrl', 'screenshotUrl'].map(sanitizeCsvValue).join(',')];
+        const errors = [];
+
+        for (let i = 0; i < urls.length; i++) {
+          const url = urls[i];
+          statusText.textContent = `Processing ${i + 1} of ${urls.length}: ${url.length > 60 ? url.substring(0, 60) + '…' : url}`;
+          progressBar.style.width = `${Math.round(((i) / urls.length) * 100)}%`;
+
+          try {
+            const screenshotUrl = await takeScreenshot(url);
+            rows.push([url, screenshotUrl].map(sanitizeCsvValue).join(','));
+          } catch (err) {
+            rows.push([url, ''].map(sanitizeCsvValue).join(','));
+            errors.push(`${url} → ${err.message}`);
+          }
+        }
+
+        progressBar.style.width = '100%';
+
+        const csv = rows.join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const blobUrl = URL.createObjectURL(blob);
+        downloadLink.href = blobUrl;
+        downloadLink.download = createFilename();
+        downloadLink.style.display = 'inline-block';
+        downloadLink.textContent = `Download CSV (${urls.length - errors.length}/${urls.length} succeeded)`;
+
+        if (errors.length > 0) {
+          errorList.innerHTML = '<strong>Errors:</strong><br>' + errors.map(e => `• ${e}`).join('<br>');
+        }
+
+        statusText.textContent = `Finished. ${urls.length - errors.length} of ${urls.length} screenshots captured.`;
+        statusText.style.color = errors.length === urls.length ? '#d00' : '#080';
+      }
+
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Take Screenshot';
+    });
+
+    copyBtn.addEventListener('click', () => {
+      const url = resultLink.href;
+      navigator.clipboard.writeText(url).then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+      });
+    });
+  </script>
+</body>
+</html>

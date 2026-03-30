@@ -19,12 +19,12 @@
 </head>
 <body>
   <h1>Channel Search CSV</h1>
-  <p class="muted">Search YouTube, TikTok, and Instagram profiles and export results as CSV</p>
+  <p class="muted">Search YouTube, TikTok, Instagram, and Twitter/X profiles and export results as CSV</p>
   
   <div class="row">
     <label for="query-input">Search Query</label><br />
     <input type="text" id="query-input" placeholder="e.g., bluey, mr beast, gaming channels" />
-    <p class="muted">Returns YouTube (up to 50) + TikTok + Instagram results</p>
+    <p class="muted">Returns YouTube (up to 50) + TikTok + Instagram + Twitter/X results</p>
   </div>
 
   <div class="row">
@@ -125,6 +125,15 @@
       return res.json();
     }
 
+    async function fetchTwitterProfiles(query) {
+      const url = `${API_BASE}/api/twitter/profiles?query=${encodeURIComponent(query)}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`Twitter HTTP ${res.status}: ${res.statusText}`);
+      }
+      return res.json();
+    }
+
     function resetUI() {
       progressText.textContent = '';
       downloadLink.style.display = 'none';
@@ -150,10 +159,11 @@
 
         const useTikTokScreenshots = !!tiktokScreenshotsCheckbox.checked;
 
-        const [youtubeChannels, tiktokProfiles, instagramProfiles] = await Promise.all([
+        const [youtubeChannels, tiktokProfiles, instagramProfiles, twitterProfiles] = await Promise.all([
           fetchChannels(query, MAX_RESULTS),
           fetchTikTokProfiles(query, useTikTokScreenshots),
-          fetchInstagramProfiles(query)
+          fetchInstagramProfiles(query),
+          fetchTwitterProfiles(query)
         ]);
 
         const channels = [];
@@ -165,6 +175,9 @@
         }
         for (const c of (Array.isArray(instagramProfiles) ? instagramProfiles : [])) {
           channels.push({ platform: 'Instagram', ...c });
+        }
+        for (const c of (Array.isArray(twitterProfiles) ? twitterProfiles : [])) {
+          channels.push({ platform: 'Twitter', ...c });
         }
 
         if (!channels || channels.length === 0) {

@@ -679,6 +679,108 @@ app.get('/api/tiktok/profiles', async (req, res) => {
   }
 });
 
+app.get('/api/twitter/profiles', async (req, res) => {
+  const query = (req.query.query || '').toString().trim();
+  const apifyKey = process.env.APIFY_API_KEY;
+  const maxResultsRaw = req.query.maxResults != null ? parseInt(req.query.maxResults, 10) : 50;
+  const maxResults = Number.isFinite(maxResultsRaw) ? Math.min(100, Math.max(1, maxResultsRaw)) : 50;
+
+  if (!query) {
+    return res.status(400).json({ error: 'MISSING_QUERY' });
+  }
+
+  if (!apifyKey) {
+    return res.status(503).json({ error: 'APIFY_API_KEY_NOT_CONFIGURED' });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
+
+  try {
+    const fetch = require('node-fetch');
+
+    // Run Apify actor: watcher.data/search-x-by-keywords with searchType=users
+    // This directly hits the Twitter People search tab and returns user profile data
+    const actorId = 'watcher.data/search-x-by-keywords';
+    const runUrl = new URL(`https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs`);
+    runUrl.searchParams.set('token', apifyKey);
+    runUrl.searchParams.set('waitForFinish', '120');
+
+    const runResp = await fetch(runUrl.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ searchType: 'users', keywords: [query], maxItemsPerKeyword: maxResults, outputFormat: 'json' }),
+      signal: controller.signal
+    });
+    const runText = await runResp.text();
+    let runBody = null;
+    try { runBody = runText ? JSON.parse(runText) : null; } catch (_) { runBody = null; }
+
+    if (!runResp.ok) {
+      return res.status(502).json({ error: 'APIFY_RUN_FAILED', status: runResp.status, detail: runBody || runText });
+    }
+
+    const datasetId = runBody?.data?.defaultDatasetId || runBody?.defaultDatasetId || null;
+    if (!datasetId) {
+      return res.status(502).json({ error: 'APIFY_NO_DATASET_ID', detail: runBody || null });
+    }
+
+    const itemsUrl = new URL(`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items`);
+    itemsUrl.searchParams.set('token', apifyKey);
+    itemsUrl.searchParams.set('clean', 'true');
+    itemsUrl.searchParams.set('format', 'json');
+
+    const itemsResp = await fetch(itemsUrl.toString(), { signal: controller.signal });
+    const itemsText = await itemsResp.text();
+    let itemsBody = null;
+    try { itemsBody = itemsText ? JSON.parse(itemsText) : []; } catch (_) { itemsBody = []; }
+
+    if (!itemsResp.ok) {
+      return res.status(502).json({ error: 'APIFY_DATASET_FAILED', status: itemsResp.status, detail: itemsText });
+    }
+
+    // Normalize user results (each item is a user profile, not a tweet)
+    const seen = new Set();
+    const out = [];
+
+    if (Array.isArray(itemsBody)) {
+      for (const user of itemsBody) {
+        const username = (user?.username || '').toString().trim();
+        if (!username) continue;
+
+        const key = username.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const followers = user?.followers_count ?? null;
+        const profileUrl = user?.profile_url || `https://x.com/${username}`;
+
+        out.push({
+          channelName: user?.name || null,
+          channelUrl: profileUrl,
+          channelHandle: username,
+          thumbnailUrl: user?.profile_image_url || null,
+          description: user?.description || null,
+          subscriberCount: (typeof followers === 'number' ? followers : (Number.isFinite(Number(followers)) ? Number(followers) : null)),
+          videoCount: null
+        });
+
+        if (out.length >= maxResults) break;
+      }
+    }
+
+    return res.json(out);
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return res.status(504).json({ error: 'TIMEOUT' });
+    }
+    console.error('Unexpected Twitter profiles error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR' });
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
 // Instagram endpoint for scraping post metrics
 app.get('/api/instagram/video', async (req, res) => {
   const { url } = req.query;
@@ -1607,7 +1709,8 @@ app.get('/', (req, res) => {
     message: 'Social Media Metadata API Server',
     ui: {
       csvGenerator: '/csv.html (Batch process URLs and download CSV)',
-      channelSearch: '/channels.html (YouTube channel search CSV export)'
+      channelSearch: '/channels.html (YouTube channel search CSV export)',
+      screenshotTool: '/screenshot.html (Take screenshots and get public URLs or download CSV)'
     },
     endpoints: {
       chartmetric: '/api/chartmetric/metadata?url=<SPOTIFY_URL>&verbose=1 (Spotify tracks, albums, artists, playlists - includes streaming data)',
@@ -1624,6 +1727,7 @@ app.get('/', (req, res) => {
       tiktokYtdlp: '/api/tiktok/ytdlp?url=<URL_ENCODED_TIKTOK_URL> (uses yt-dlp)',
       tiktokProfiles: '/api/tiktok/profiles?query=<SEARCH_TERM> (EnsembleData discovery)',
       instagramProfiles: '/api/instagram/profiles?query=<SEARCH_TERM> (EnsembleData discovery + Apify enrichment)',
+      twitterProfiles: '/api/twitter/profiles?query=<SEARCH_TERM> (Apify xtdata/twitter-x-scraper)',
       instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>',
       screenshot: '/api/screenshot?url=<URL_ENCODED_URL>&download=1&fullPage=1'
     },

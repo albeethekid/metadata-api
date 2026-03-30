@@ -297,6 +297,46 @@ An array of normalized profile objects:
 
 ---
 
+# Twitter / X
+
+## `GET /api/twitter/profiles`
+
+Search Twitter/X profiles by keyword.
+
+- Discovery via Apify actor `watcher.data/search-x-by-keywords` (`searchType: "users"`)
+
+### Query params
+
+- `query` (required): search term
+- `maxResults` (optional, default `50`, max `100`)
+
+### Behavior
+
+- Calls the Apify actor which hits the Twitter People search tab directly, returning accounts whose name/bio matches the keyword.
+- Results are deduplicated by username.
+
+### Response
+
+An array of normalized profile objects:
+
+- `channelName`
+- `channelUrl`
+- `channelHandle`
+- `thumbnailUrl`
+- `description`
+- `subscriberCount`
+- `videoCount`
+
+### Errors
+
+- `400` if `query` is missing
+- `503` if `APIFY_API_KEY` is not configured
+- `502` `APIFY_RUN_FAILED` if the Apify actor run fails
+- `502` `APIFY_NO_DATASET_ID` if the actor response has no dataset ID
+- `502` `APIFY_DATASET_FAILED` if fetching dataset items fails
+
+---
+
 # Screenshot / Rendering
 
 ## `GET /api/screenshot`
@@ -455,9 +495,24 @@ Source: `public/channels.html`
 - **Instagram profile search**
   - Calls: `GET /api/instagram/profiles?query=<QUERY>`
 
+- **Twitter/X profile search**
+  - Calls: `GET /api/twitter/profiles?query=<QUERY>`
+
 ### Notes
 
 - The UI merges all results and adds a `platform` column to the generated CSV.
+
+---
+
+## Screenshot Tool UI: `GET /screenshot.html`
+
+Source: `public/screenshot.html`
+
+Paste one or more URLs into the textarea and capture Cloudflare R2-hosted screenshots.
+
+- **Single URL**: calls `GET /api/screenshot?url=...&meta=1&storage_provider=cloudflare` and displays the resulting public `s3_url` with a copy button.
+- **Multiple URLs**: processes each URL serially with a progress bar, then downloads a CSV with columns `originalUrl` and `screenshotUrl`.
+- Optional **full page** checkbox sets `fullPage=1`.
 
 ---
 
