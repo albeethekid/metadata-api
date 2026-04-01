@@ -559,6 +559,7 @@ app.get('/api/tiktok/profiles', async (req, res) => {
       try { body = text ? JSON.parse(text) : null; } catch (_) { body = null; }
 
       if (!resp.ok) {
+        console.error('EnsembleData TikTok user search failed', { status: resp.status, detail: body || text });
         return res.status(502).json({ error: 'ENSEMBLEDATA_REQUEST_FAILED', status: resp.status, detail: body || text });
       }
 
