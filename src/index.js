@@ -659,11 +659,7 @@ app.get('/api/tiktok/profiles', async (req, res) => {
       }
 
       if (failures.length > 0) {
-        return res.status(502).json({
-          error: 'SCREENSHOT_UPLOAD_FAILED',
-          message: 'Failed to upload screenshots for one or more profiles. Check /api/screenshot and R2 configuration.',
-          failures
-        });
+        console.warn(`TikTok profiles: ${failures.length} screenshot(s) failed (thumbnailUrl set to null for those profiles)`, failures.map(f => f.channelHandle));
       }
     }
 
