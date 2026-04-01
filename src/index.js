@@ -649,18 +649,18 @@ app.get('/api/tiktok/profiles', async (req, res) => {
           if (metaResp.ok && metaBody && metaBody.s3_url) {
             item.thumbnailUrl = metaBody.s3_url;
           } else {
-            item.thumbnailUrl = null;
+            item.thumbnailUrl = item.channelUrl;
             failures.push({ channelHandle: item.channelHandle, channelUrl: item.channelUrl });
           }
         } catch (e) {
-          item.thumbnailUrl = null;
+          item.thumbnailUrl = item.channelUrl;
           failures.push({ channelHandle: item.channelHandle, channelUrl: item.channelUrl });
           console.warn('TikTok screenshot thumbnail failed for', profileUrl, e?.message || e);
         }
       }
 
       if (failures.length > 0) {
-        console.warn(`TikTok profiles: ${failures.length} screenshot(s) failed (thumbnailUrl set to null for those profiles)`, failures.map(f => f.channelHandle));
+        console.warn(`TikTok profiles: ${failures.length} screenshot(s) failed (thumbnailUrl fell back to channelUrl for those profiles)`, failures.map(f => f.channelHandle));
       }
     }
 
