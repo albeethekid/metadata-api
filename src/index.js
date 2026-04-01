@@ -629,8 +629,9 @@ app.get('/api/tiktok/profiles', async (req, res) => {
     if (useScreenshotThumbnail) {
       const fetch = require('node-fetch');
       const failures = [];
-      for (let i = 0; i < out.length; i += 1) {
-        const item = out[i];
+      const SCREENSHOT_BATCH_SIZE = 5;
+
+      const takeScreenshotForItem = async (item) => {
         const profileUrl = item.channelUrl;
         try {
           const screenshotMetaUrl = new URL(`${protocol}://${host}/api/screenshot`);
@@ -657,6 +658,10 @@ app.get('/api/tiktok/profiles', async (req, res) => {
           failures.push({ channelHandle: item.channelHandle, channelUrl: item.channelUrl });
           console.warn('TikTok screenshot thumbnail failed for', profileUrl, e?.message || e);
         }
+      };
+
+      for (let i = 0; i < out.length; i += SCREENSHOT_BATCH_SIZE) {
+        await Promise.allSettled(out.slice(i, i + SCREENSHOT_BATCH_SIZE).map(takeScreenshotForItem));
       }
 
       if (failures.length > 0) {
