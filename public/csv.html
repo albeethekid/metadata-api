@@ -298,7 +298,7 @@
         return res.json();
       }
       if (entry.platform === 'instagram') {
-        const url = `${API_BASE}/api/instagram/video?url=${encodeURIComponent(entry.url)}`;
+        const url = `${API_BASE}/api/instagram/video/apify?url=${encodeURIComponent(entry.url)}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();

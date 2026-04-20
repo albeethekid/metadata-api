@@ -941,6 +941,120 @@ function parseInstagramUrl(encodedUrl) {
   }
 }
 
+// Instagram video endpoint using Apify
+app.get('/api/instagram/video/apify', async (req, res) => {
+  const { url } = req.query;
+  const verbose = req.query.verbose === '1';
+  const apifyKey = process.env.APIFY_API_KEY;
+
+  if (!url) {
+    return res.status(400).json({
+      error: "Invalid request",
+      detail: "Query param `url` is required.",
+      example: "/api/instagram/video/apify?url=https%3A%2F%2Fwww.instagram.com%2Fp%2FCgtXoBxr_FU%2F"
+    });
+  }
+
+  if (!apifyKey) {
+    return res.status(503).json({ error: 'APIFY_API_KEY_NOT_CONFIGURED' });
+  }
+
+  const parsedUrl = parseInstagramUrl(url);
+  if (!parsedUrl) {
+    return res.status(400).json({
+      error: "Invalid request",
+      detail: "Invalid Instagram URL. Supported formats: /p/{shortcode}/, /reel/{shortcode}/, /tv/{shortcode}/",
+      example: "/api/instagram/video/apify?url=https%3A%2F%2Fwww.instagram.com%2Fp%2FCgtXoBxr_FU%2F"
+    });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
+
+  try {
+    const fetch = require('node-fetch');
+
+    const actorId = 'apify/instagram-scraper';
+    const runUrl = new URL(`https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs`);
+    runUrl.searchParams.set('token', apifyKey);
+    runUrl.searchParams.set('waitForFinish', '120');
+
+    const runResp = await fetch(runUrl.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        directUrls: [parsedUrl.decodedUrl],
+        resultsType: 'posts'
+      }),
+      signal: controller.signal
+    });
+
+    const runText = await runResp.text();
+    let runBody = null;
+    try { runBody = runText ? JSON.parse(runText) : null; } catch (_) { runBody = null; }
+
+    if (!runResp.ok) {
+      return res.status(502).json({ error: 'APIFY_RUN_FAILED', status: runResp.status, detail: runBody || runText });
+    }
+
+    const datasetId = runBody?.data?.defaultDatasetId || runBody?.defaultDatasetId || null;
+    if (!datasetId) {
+      return res.status(502).json({ error: 'APIFY_NO_DATASET_ID', detail: runBody || null });
+    }
+
+    const itemsUrl = new URL(`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items`);
+    itemsUrl.searchParams.set('token', apifyKey);
+    itemsUrl.searchParams.set('clean', 'true');
+    itemsUrl.searchParams.set('format', 'json');
+
+    const itemsResp = await fetch(itemsUrl.toString(), { signal: controller.signal });
+    const itemsText = await itemsResp.text();
+    let itemsBody = null;
+    try { itemsBody = itemsText ? JSON.parse(itemsText) : []; } catch (_) { itemsBody = []; }
+
+    if (!itemsResp.ok) {
+      return res.status(502).json({ error: 'APIFY_DATASET_FAILED', status: itemsResp.status, detail: itemsText });
+    }
+
+    if (!Array.isArray(itemsBody) || itemsBody.length === 0) {
+      return res.status(404).json({ error: 'POST_NOT_FOUND', detail: 'No data returned from Apify' });
+    }
+
+    const post = itemsBody[0];
+
+    // Normalize to match /api/instagram/video response shape
+    const response = {
+      platform: "instagram",
+      inputUrl: parsedUrl.decodedUrl,
+      videoId: post.shortCode || parsedUrl.shortcode,
+      publishedAt: post.timestamp || null,
+      description: post.caption || null,
+      authorHandle: post.ownerUsername || null,
+      heroImageUrl: post.displayUrl || null,
+      metrics: {
+        views: post.videoViewCount ?? post.videoPlayCount ?? null,
+        likes: post.likesCount ?? null,
+        comments: post.commentsCount ?? null,
+        shares: null
+      }
+    };
+
+    if (verbose) {
+      response.apifyData = post;
+    }
+
+    return res.json(response);
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return res.status(504).json({ error: 'TIMEOUT' });
+    }
+    console.error('Unexpected Instagram Apify error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR' });
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
 function parseSpotifyUrl(inputUrl) {
   try {
     const decodedUrl = decodeURIComponent(inputUrl);
@@ -1731,6 +1845,7 @@ app.get('/', (req, res) => {
       instagramProfiles: '/api/instagram/profiles?query=<SEARCH_TERM> (EnsembleData discovery + Apify enrichment)',
       twitterProfiles: '/api/twitter/profiles?query=<SEARCH_TERM> (Apify xtdata/twitter-x-scraper)',
       instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>',
+      instagramApify: '/api/instagram/video/apify?url=<URL_ENCODED_INSTAGRAM_URL>&verbose=1 (Apify instagram-scraper)',
       screenshot: '/api/screenshot?url=<URL_ENCODED_URL>&download=1&fullPage=1'
     },
     examples: {

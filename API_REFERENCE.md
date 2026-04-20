@@ -262,6 +262,49 @@ Scrape Instagram post/reel/tv metrics.
 
 ---
 
+## `GET /api/instagram/video/apify`
+
+Fetch Instagram post/reel/tv metrics using Apify's `instagram-scraper` actor.
+
+### Query params
+
+- `url` (required): Instagram URL
+- `verbose` (optional): `verbose=1` includes full Apify response data in `apifyData` field
+
+### Behavior
+
+- Uses Apify `apify/instagram-scraper` actor
+- Returns normalized response matching `/api/instagram/video` shape
+- When `verbose=1`, includes full Apify post data with additional fields like:
+  - `hashtags`, `mentions`, `taggedUsers`
+  - `latestComments` (array of recent comments)
+  - `videoUrl`, `displayUrl`, `images`
+  - `coauthorProducers`, `musicInfo`
+  - `dimensionsHeight`, `dimensionsWidth`
+  - `productType`, `videoDuration`
+
+### Response
+
+Same shape as `/api/instagram/video`:
+- `platform`: "instagram"
+- `inputUrl`: decoded URL
+- `videoId`: shortcode
+- `publishedAt`: ISO timestamp
+- `description`: caption
+- `authorHandle`: username
+- `heroImageUrl`: display image URL
+- `metrics`: { `views`, `likes`, `comments`, `shares` }
+- `apifyData` (only if `verbose=1`): full Apify post object
+
+### Errors
+
+- `400` if `url` is missing or invalid
+- `503` if `APIFY_API_KEY` not configured
+- `502` if Apify actor run fails
+- `404` if no data returned from Apify
+
+---
+
 ## `GET /api/instagram/profiles`
 
 Search Instagram profiles by keyword:
