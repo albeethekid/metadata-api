@@ -257,6 +257,159 @@ app.get('/api/channel/:channelId', async (req, res) => {
   }
 });
 
+// Helper: score a playlist item for sibling relevance
+function scoreVideoForSiblings(item, query, sourceTitle, sourceDescription) {
+  const rawTitle = item.snippet?.title || '';
+  const rawDescription = item.snippet?.description || '';
+  const title = rawTitle.toLowerCase();
+  const description = rawDescription.toLowerCase();
+  const queryLower = query.toLowerCase();
+  const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+
+  let score = 0;
+  const reasons = [];
+
+  // 1. Exact query phrase in title (strongest signal)
+  if (queryTerms.length > 0 && title.includes(queryLower)) {
+    score += 50;
+    reasons.push('exact query match in title');
+  } else if (queryTerms.length > 0) {
+    const titleMatches = queryTerms.filter(t => title.includes(t));
+    if (titleMatches.length > 0) {
+      score += Math.round(30 * (titleMatches.length / queryTerms.length));
+      reasons.push('query match in title');
+    }
+  }
+
+  // 2. Chapter / series pattern in title
+  if (/\b(chapter|part|vol\.?|volume|ep\.?|episode|book|section|pt\.?)\s*[.#-]?\s*\d+/i.test(rawTitle)) {
+    score += 25;
+    reasons.push('chapter pattern match');
+  }
+
+  // 3. Query terms in description
+  if (queryTerms.length > 0) {
+    const descMatches = queryTerms.filter(t => description.includes(t));
+    if (descMatches.length >= Math.ceil(queryTerms.length * 0.5)) {
+      score += 10;
+      reasons.push('query match in description');
+    }
+  }
+
+  // 4. Source title word overlap
+  if (sourceTitle) {
+    const sourceTitleTerms = sourceTitle.toLowerCase().split(/\s+/).filter(t => t.length > 3);
+    if (sourceTitleTerms.length > 0) {
+      const overlap = sourceTitleTerms.filter(t => title.includes(t));
+      if (overlap.length >= Math.ceil(sourceTitleTerms.length * 0.4)) {
+        score += 15;
+        reasons.push('title similarity to source');
+      }
+    }
+  }
+
+  // 5. Source description keyword overlap
+  if (sourceDescription) {
+    const sourceDescTerms = [...new Set(
+      sourceDescription.toLowerCase().split(/\W+/).filter(t => t.length > 4)
+    )].slice(0, 20);
+    if (sourceDescTerms.length > 0) {
+      const overlap = sourceDescTerms.filter(t => description.includes(t) || title.includes(t));
+      if (overlap.length >= 3) {
+        score += 10;
+        reasons.push('description similarity to source');
+      }
+    }
+  }
+
+  return { score: Math.min(score, 100), reasons };
+}
+
+app.get('/api/youtube/discover-siblings', async (req, res) => {
+  const channelId = (req.query.channelId || '').trim();
+  const query = (req.query.query || '').trim();
+  const maxResultsRaw = req.query.maxResults != null ? parseInt(req.query.maxResults, 10) : 100;
+  const minScoreRaw = req.query.minScore != null ? parseInt(req.query.minScore, 10) : 40;
+  let sourceVideoId = (req.query.sourceVideoId || '').trim() || null;
+  const sourceTitle = (req.query.sourceTitle || '').trim() || null;
+  const sourceDescription = (req.query.sourceDescription || '').trim() || null;
+
+  if (!channelId) {
+    return res.status(400).json({ error: 'Query param `channelId` is required.' });
+  }
+  if (!query) {
+    return res.status(400).json({ error: 'Query param `query` is required.' });
+  }
+
+  const maxResults = Math.min(Math.max(isNaN(maxResultsRaw) ? 100 : maxResultsRaw, 1), 300);
+  const minScore = Math.min(Math.max(isNaN(minScoreRaw) ? 0 : minScoreRaw, 0), 100);
+
+  try {
+    // 1. Fetch channel snippet + contentDetails (for uploadsPlaylistId)
+    const channelData = await youtubeClient.getChannelContentDetails(channelId);
+    if (!channelData) {
+      return res.status(404).json({ error: 'Channel not found', channelId });
+    }
+
+    const uploadsPlaylistId = channelData.contentDetails?.relatedPlaylists?.uploads;
+    if (!uploadsPlaylistId) {
+      return res.status(502).json({ error: 'Could not determine uploads playlist for channel', channelId });
+    }
+
+    // 2. Paginate through uploads playlist up to maxResults
+    const playlistItems = await youtubeClient.getPlaylistItemsAll(uploadsPlaylistId, maxResults);
+
+    // 3. Score each candidate
+    const matches = [];
+    for (const item of playlistItems) {
+      const videoId = item.snippet?.resourceId?.videoId;
+      if (!videoId) continue;
+      if (sourceVideoId && videoId === sourceVideoId) continue;
+
+      const { score, reasons } = scoreVideoForSiblings(item, query, sourceTitle, sourceDescription);
+      if (score < minScore) continue;
+
+      const thumbnails = item.snippet?.thumbnails || {};
+      matches.push({
+        videoId,
+        title: item.snippet?.title || null,
+        description: item.snippet?.description || null,
+        publishedAt: item.snippet?.publishedAt || null,
+        channelId: item.snippet?.channelId || channelId,
+        channelTitle: item.snippet?.channelTitle || channelData.snippet?.title || null,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        thumbnailUrl:
+          thumbnails.high?.url ||
+          thumbnails.medium?.url ||
+          thumbnails.default?.url ||
+          null,
+        score,
+        scoreReasons: reasons
+      });
+    }
+
+    matches.sort((a, b) => b.score - a.score);
+
+    return res.json({
+      platform: 'youtube',
+      query,
+      channel: {
+        channelId,
+        title: channelData.snippet?.title || null,
+        uploadsPlaylistId
+      },
+      summary: {
+        candidatesScanned: playlistItems.length,
+        matchesReturned: matches.length
+      },
+      matches
+    });
+  } catch (error) {
+    console.error('discover-siblings error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // curl "http://localhost:3000/api/tiktok/video/metrics?url=https%3A%2F%2Fwww.tiktok.com%2F%40yaroslavslonsky%2Fvideo%2F7568246874558237965"
 app.get('/api/tiktok/video/metrics', async (req, res) => {
   const { url } = req.query;
@@ -1826,7 +1979,8 @@ app.get('/', (req, res) => {
     ui: {
       csvGenerator: '/csv.html (Batch process URLs and download CSV)',
       channelSearch: '/channels.html (YouTube channel search CSV export)',
-      screenshotTool: '/screenshot.html (Take screenshots and get public URLs or download CSV)'
+      screenshotTool: '/screenshot.html (Take screenshots and get public URLs or download CSV)',
+      discoverSiblings: '/discover-siblings.html (Upload SERP CSV to find related videos on same channel)'
     },
     endpoints: {
       chartmetric: '/api/chartmetric/metadata?url=<SPOTIFY_URL>&verbose=1 (Spotify tracks, albums, artists, playlists - includes streaming data)',
@@ -1846,6 +2000,7 @@ app.get('/', (req, res) => {
       twitterProfiles: '/api/twitter/profiles?query=<SEARCH_TERM> (Apify xtdata/twitter-x-scraper)',
       instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>',
       instagramApify: '/api/instagram/video/apify?url=<URL_ENCODED_INSTAGRAM_URL>&verbose=1 (Apify instagram-scraper)',
+      discoverSiblings: '/api/youtube/discover-siblings?channelId=<CHANNEL_ID_OR_@HANDLE>&query=<SEARCH_TERM>&maxResults=100&minScore=40 (scan channel uploads for related content)',
       screenshot: '/api/screenshot?url=<URL_ENCODED_URL>&download=1&fullPage=1'
     },
     examples: {

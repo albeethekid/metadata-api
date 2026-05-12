@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sibling Discovery – SERP CSV Enrichment</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; }
+    h1 { margin-bottom: 6px; }
+    p.desc { margin: 0 0 16px; color: #555; font-size: 14px; }
+    .row { margin: 12px 0; }
+    button { padding: 10px 16px; font-size: 14px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin-top: 8px; font-size: 14px; color: #444; }
+    .muted { color: #666; font-size: 13px; }
+    #download-link { display: none; margin-top: 12px; font-size: 14px; }
+    input[type=file] { font-size: 14px; }
+    input[type=number] { width: 80px; padding: 4px 8px; font-size: 14px; box-sizing: border-box; }
+    .controls { display: flex; gap: 24px; align-items: flex-end; flex-wrap: wrap; margin: 12px 0; }
+    .control-group { display: flex; flex-direction: column; }
+    .control-group label { font-size: 13px; color: #555; margin-bottom: 3px; }
+    details { margin-top: 10px; }
+    details summary { cursor: pointer; font-size: 13px; color: #666; }
+    pre { font-size: 12px; color: #555; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: auto; background: #f8f8f8; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Sibling Discovery – SERP CSV Enrichment</h1>
+  <p class="desc">
+    Upload a SERP results CSV. For each YouTube row with a channel reference in
+    <code>likeness_match</code> and a title in <code>client_category_override</code>,
+    the endpoint scans the channel for related videos and appends them as new rows.
+  </p>
+
+  <div class="row">
+    <label for="csv-file"><strong>SERP CSV File</strong></label><br />
+    <input type="file" id="csv-file" accept=".csv,text/csv" />
+  </div>
+
+  <div class="controls">
+    <div class="control-group">
+      <label for="min-score">Min Score (0–100)</label>
+      <input type="number" id="min-score" value="40" min="0" max="100" />
+    </div>
+    <div class="control-group">
+      <label for="max-results">Max Uploads to Scan per Channel</label>
+      <input type="number" id="max-results" value="100" min="1" max="300" />
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="process-btn" disabled>Process CSV</button>
+  </div>
+
+  <div class="status" id="progress-text"></div>
+  <div class="status muted" id="detail-text"></div>
+  <a id="download-link" href="#" download>Download Enriched CSV</a>
+
+  <details id="error-details" style="display:none">
+    <summary>Skipped / errors</summary>
+    <pre id="error-pre"></pre>
+  </details>
+
+  <script>
+    const API_BASE = '';
+
+    const fileInput     = document.getElementById('csv-file');
+    const processBtn    = document.getElementById('process-btn');
+    const minScoreInput = document.getElementById('min-score');
+    const maxResultsInput = document.getElementById('max-results');
+    const progressText  = document.getElementById('progress-text');
+    const detailText    = document.getElementById('detail-text');
+    const downloadLink  = document.getElementById('download-link');
+    const errorDetails  = document.getElementById('error-details');
+    const errorPre      = document.getElementById('error-pre');
+
+    fileInput.addEventListener('change', () => {
+      processBtn.disabled = !fileInput.files || fileInput.files.length === 0;
+    });
+
+    // ── CSV parsing ────────────────────────────────────────────────────────────
+
+    function parseCsvLine(line) {
+      const fields = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (inQuotes) {
+          if (ch === '"') {
+            if (i + 1 < line.length && line[i + 1] === '"') { cur += '"'; i++; }
+            else { inQuotes = false; }
+          } else {
+            cur += ch;
+          }
+        } else {
+          if (ch === '"') { inQuotes = true; }
+          else if (ch === ',') { fields.push(cur); cur = ''; }
+          else { cur += ch; }
+        }
+      }
+      fields.push(cur);
+      return fields;
+    }
+
+    function parseCsv(text) {
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      if (lines.length < 2) return { headers: [], rows: [] };
+      const headers = parseCsvLine(lines[0]);
+      const rows = [];
+      for (let i = 1; i < lines.length; i++) {
+        const vals = parseCsvLine(lines[i]);
+        const row = {};
+        headers.forEach((h, idx) => { row[h] = vals[idx] !== undefined ? vals[idx] : ''; });
+        rows.push(row);
+      }
+      return { headers, rows };
+    }
+
+    function toCsvField(value) {
+      const str = String(value ?? '');
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+
+    function buildCsvLine(headers, row) {
+      return headers.map(h => toCsvField(row[h] ?? '')).join(',');
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    function extractYouTubeVideoId(url) {
+      if (!url) return null;
+      try {
+        const u = new URL(url);
+        const host = u.hostname.replace(/^www\./, '');
+        if (host === 'youtu.be') return u.pathname.split('/').filter(Boolean)[0] || null;
+        if (host.endsWith('youtube.com')) {
+          if (u.searchParams.get('v')) return u.searchParams.get('v');
+          const parts = u.pathname.split('/').filter(Boolean);
+          if (parts[0] === 'shorts' && parts[1]) return parts[1];
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    function isChannelRef(val) {
+      if (!val) return false;
+      return val.startsWith('@') || /^UC[\w-]{20,}$/.test(val);
+    }
+
+    // ── Concurrency helper (same pattern as csv.html) ─────────────────────────
+
+    async function runWithLimit(tasks, limit, onProgress) {
+      let index = 0;
+      async function next() {
+        if (index >= tasks.length) return;
+        const i = index++;
+        await tasks[i]();
+        onProgress(i + 1, tasks.length);
+        await next();
+      }
+      const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => next());
+      await Promise.all(workers);
+    }
+
+    // ── Core processing ────────────────────────────────────────────────────────
+
+    async function processFile(text, minScore, maxResults) {
+      const { headers, rows } = parseCsv(text);
+      if (!headers.length || !rows.length) throw new Error('Empty or invalid CSV');
+
+      const cache    = new Map();
+      const messages = [];
+      let rowsSkipped = 0;
+      let apiErrors   = 0;
+
+      // ── Pass 1: collect unique (channelId, query) tasks ───────────────────
+      const taskMeta = new Map(); // cacheKey → { channelId, query, sourceTitle }
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const platform = (row.platform || '').toUpperCase();
+        if (platform !== 'YOUTUBE') { rowsSkipped++; continue; }
+
+        const channelId = (row.likeness_match || '').trim();
+        const query     = (row.client_category_override || '').trim();
+
+        if (!isChannelRef(channelId)) {
+          rowsSkipped++;
+          messages.push(`Row ${i + 2}: skipped — no valid channel ref in likeness_match ("${channelId.slice(0, 40)}")`);
+          continue;
+        }
+        if (!query) {
+          rowsSkipped++;
+          messages.push(`Row ${i + 2}: skipped — empty client_category_override`);
+          continue;
+        }
+
+        const cacheKey = `${channelId}|||${query}`;
+        if (!taskMeta.has(cacheKey)) {
+          taskMeta.set(cacheKey, { channelId, query, sourceTitle: (row.title || '').trim() });
+        }
+      }
+
+      // ── Pass 2: run API calls concurrently (limit 3) ──────────────────────
+      const taskKeys  = [...taskMeta.keys()];
+      const taskList  = taskKeys.map(cacheKey => async () => {
+        const { channelId, query, sourceTitle } = taskMeta.get(cacheKey);
+        try {
+          const params = new URLSearchParams({ channelId, query, maxResults, minScore });
+          if (sourceTitle) params.set('sourceTitle', sourceTitle);
+          const resp = await fetch(`${API_BASE}/api/youtube/discover-siblings?${params}`);
+          const data = await resp.json();
+          if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+          cache.set(cacheKey, data.matches || []);
+        } catch (e) {
+          cache.set(cacheKey, []);
+          apiErrors++;
+          messages.push(`Channel "${channelId}" / query "${query}": API error — ${e.message}`);
+        }
+      });
+
+      await runWithLimit(taskList, 3, (done, total) => {
+        progressText.textContent =
+          `Querying channels… ${done} of ${total} done (${total - done} remaining)`;
+      });
+
+      // ── Pass 3: build output rows in original order ───────────────────────
+      const outputRows   = [];
+      let siblingsFound  = 0;
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        outputRows.push(row);
+
+        const platform = (row.platform || '').toUpperCase();
+        if (platform !== 'YOUTUBE') continue;
+
+        const channelId = (row.likeness_match || '').trim();
+        const query     = (row.client_category_override || '').trim();
+        if (!isChannelRef(channelId) || !query) continue;
+
+        const cacheKey      = `${channelId}|||${query}`;
+        const sourceVideoId = extractYouTubeVideoId(row.page_url);
+        const siblings      = cache.get(cacheKey) || [];
+
+        const toAppend = sourceVideoId
+          ? siblings.filter(m => m.videoId !== sourceVideoId)
+          : siblings;
+
+        for (const match of toAppend) {
+          const newRow = {};
+          headers.forEach(h => { newRow[h] = ''; });
+
+          newRow.content_type             = row.content_type;
+          newRow.platform                 = row.platform;
+          newRow.client_category_override = row.client_category_override;
+          newRow.timestamp                = row.timestamp;
+          newRow.organizationId           = row.organizationId;
+          newRow.protection_profile_id    = row.protection_profile_id;
+
+          newRow.title       = match.title        || '';
+          newRow.page_url    = match.url          || '';
+          newRow.content_url = match.thumbnailUrl || '';
+
+          outputRows.push(newRow);
+          siblingsFound++;
+        }
+      }
+
+      const channelsQueried = taskKeys.length - apiErrors;
+      return { headers, outputRows, channelsQueried, rowsSkipped, siblingsFound, apiErrors, messages };
+    }
+
+    // ── Button handler ─────────────────────────────────────────────────────────
+
+    processBtn.addEventListener('click', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      processBtn.disabled  = true;
+      processBtn.textContent = 'Processing…';
+      progressText.textContent = 'Reading file…';
+      detailText.textContent   = '';
+      errorDetails.style.display = 'none';
+      errorPre.textContent     = '';
+      downloadLink.style.display = 'none';
+
+      const minScore   = Math.min(Math.max(parseInt(minScoreInput.value, 10)   || 40,  0), 100);
+      const maxResults = Math.min(Math.max(parseInt(maxResultsInput.value, 10) || 100, 1), 300);
+
+      try {
+        const text = await file.text();
+        const { headers, outputRows, channelsQueried, rowsSkipped, siblingsFound, apiErrors, messages } =
+          await processFile(text, minScore, maxResults);
+
+        // Build output CSV
+        const csvLines = [headers.map(toCsvField).join(',')];
+        for (const row of outputRows) csvLines.push(buildCsvLine(headers, row));
+        const csvText = csvLines.join('\n');
+
+        const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+        const objUrl = URL.createObjectURL(blob);
+        downloadLink.href = objUrl;
+
+        const now = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        downloadLink.download =
+          `serp-siblings-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
+        downloadLink.style.display = 'inline-block';
+
+        progressText.textContent =
+          `Done — ${channelsQueried} channels queried, ${siblingsFound} sibling rows added. ` +
+          `${outputRows.length} total rows in output.`;
+        detailText.textContent = [
+          rowsSkipped  > 0 ? `${rowsSkipped} rows skipped (non-YouTube or missing fields).` : '',
+          apiErrors    > 0 ? `${apiErrors} API error(s).` : ''
+        ].filter(Boolean).join('  ');
+
+        if (messages.length > 0) {
+          errorDetails.style.display = '';
+          errorPre.textContent = messages.join('\n');
+        }
+      } catch (e) {
+        progressText.textContent = `Error: ${e.message}`;
+      } finally {
+        processBtn.disabled    = false;
+        processBtn.textContent = 'Process CSV';
+      }
+    });
+  </script>
+</body>
+</html>

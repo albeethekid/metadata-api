@@ -114,6 +114,75 @@ Fetch recent videos for a YouTube channel.
 
 ---
 
+## `GET /api/youtube/discover-siblings`
+
+Given a known infringing YouTube channel, scan its uploads playlist and return videos that likely belong to the same content series (e.g. audiobook chapters). Useful for identifying related infringing content after an initial SERP hit.
+
+### Query params
+
+- `channelId` (required): YouTube channel ID
+- `query` (required): search string used to score videos (e.g. book title or series name)
+- `maxResults` (optional): number of channel uploads to scan, default `100`, max `300`
+- `minScore` (optional): only return videos at this score or higher, default `40`, max `100`
+- `sourceVideoId` (optional): video ID to exclude from results (the already-known infringing video)
+- `sourceTitle` (optional): title of the source video — improves scoring via title word overlap
+- `sourceDescription` (optional): description of the source video — improves scoring via keyword overlap
+
+### Scoring
+
+Each candidate video is scored 0–100 based on:
+
+| Signal | Points |
+|---|---|
+| Exact query phrase in title | +50 |
+| Partial query term matches in title | up to +30 |
+| Chapter/Part/Vol/Episode pattern in title | +25 |
+| Query terms in description | +10 |
+| Title word overlap with `sourceTitle` | +15 |
+| Description keyword overlap with `sourceDescription` | +10 |
+
+Only videos with `score > 0` are returned, sorted by score descending.
+
+### Response
+
+```json
+{
+  "platform": "youtube",
+  "query": "...",
+  "channel": {
+    "channelId": "...",
+    "title": "...",
+    "uploadsPlaylistId": "..."
+  },
+  "summary": {
+    "candidatesScanned": 100,
+    "matchesReturned": 12
+  },
+  "matches": [
+    {
+      "videoId": "...",
+      "title": "...",
+      "description": "...",
+      "publishedAt": "...",
+      "channelId": "...",
+      "channelTitle": "...",
+      "url": "https://www.youtube.com/watch?v=...",
+      "thumbnailUrl": "...",
+      "score": 87,
+      "scoreReasons": ["exact query match in title", "chapter pattern match"]
+    }
+  ]
+}
+```
+
+### Errors
+
+- `400` if `channelId` or `query` is missing
+- `404` if channel not found
+- `502` if uploads playlist cannot be determined
+
+---
+
 ## `GET /api/video/:videoId/comments`
 
 Fetch comments for a YouTube video.
@@ -565,6 +634,11 @@ Paste one or more URLs into the textarea and capture Cloudflare R2-hosted screen
 
 - **Purpose**: YouTube video/channel search, metadata, playlists, comments, trending.
 - **Used by**: `YouTubeClient`.
+
+## Chartmetric
+
+- **Purpose**: Enriched metadata for Spotify items (tracks/albums/artists/playlists).
+- **Used by**: `/api/chartmetric/metadata`.
 
 ## EnsembleData
 

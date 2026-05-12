@@ -204,6 +204,47 @@ class YouTubeClient {
       throw error;
     }
   }
+
+  async getChannelContentDetails(channelId) {
+    try {
+      const isHandle = channelId.startsWith('@');
+      const params = { part: 'snippet,contentDetails' };
+      if (isHandle) {
+        params.forHandle = channelId.slice(1); // strip leading @
+      } else {
+        params.id = channelId;
+      }
+      const response = await this.youtube.channels.list(params);
+      return response.data.items[0] || null;
+    } catch (error) {
+      console.error('Error getting channel content details:', error.message);
+      throw error;
+    }
+  }
+
+  async getPlaylistItemsAll(playlistId, maxResults = 100) {
+    const items = [];
+    let pageToken = undefined;
+    const perPage = 50;
+
+    while (items.length < maxResults) {
+      const fetchCount = Math.min(perPage, maxResults - items.length);
+      const params = {
+        part: 'snippet',
+        playlistId: playlistId,
+        maxResults: fetchCount
+      };
+      if (pageToken) params.pageToken = pageToken;
+
+      const response = await this.youtube.playlistItems.list(params);
+      const batch = response.data.items || [];
+      items.push(...batch);
+      pageToken = response.data.nextPageToken;
+      if (!pageToken || batch.length === 0) break;
+    }
+
+    return items;
+  }
 }
 
 module.exports = YouTubeClient;
