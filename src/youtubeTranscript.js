@@ -129,6 +129,12 @@ function parseJson3Events(json3) {
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 // Build the `--proxy <url>` flag pair from project's Oxylabs config.
+//
+// We append `-cc-us-sessid-<rand>` to the username to (a) force a US-pool
+// residential IP and (b) get a fresh rotating session per request. Plain
+// `user-USERNAME` auth gives unpredictable IP geo and may reuse "warm" IPs
+// that YouTube has already soft-flagged.
+//
 // Returns { flags, info } so callers can surface whether the proxy was applied.
 function buildProxyFlags(useProxy) {
   if (useProxy === false) {
@@ -140,15 +146,25 @@ function buildProxyFlags(useProxy) {
     if (!cfg || !isProxyEnabled(useProxy)) {
       return { flags: [], info: { applied: false, reason: 'no credentials / proxy disabled in config' } };
     }
-    const proxyUrl = `${cfg.protocol}://${cfg.auth.username}:${cfg.auth.password}@${cfg.host}:${cfg.port}`;
-    const display  = `${cfg.protocol}://${cfg.host}:${cfg.port}`;
-    console.log('[YouTube transcript] Using proxy:', display);
-    return { flags: ['--proxy', proxyUrl], info: { applied: true, server: display } };
+    const sessid       = crypto.randomBytes(6).toString('hex');
+    const enhancedUser = `${cfg.auth.username}-cc-us-sessid-${sessid}`;
+    const proxyUrl     = `${cfg.protocol}://${enhancedUser}:${cfg.auth.password}@${cfg.host}:${cfg.port}`;
+    const display      = `${cfg.protocol}://${cfg.host}:${cfg.port}`;
+    console.log('[YouTube transcript] Using proxy:', display, 'user:', enhancedUser);
+    return {
+      flags: ['--proxy', proxyUrl],
+      info:  { applied: true, server: display, user: enhancedUser, sessid }
+    };
   } catch (e) {
     console.warn('[YouTube transcript] Proxy config error, continuing without proxy:', e.message);
     return { flags: [], info: { applied: false, reason: `error: ${e.message}` } };
   }
 }
+
+// Player clients that have softer bot-detection in 2025. `tv_simply` and `mweb`
+// are the current community-recommended set for bypassing the "Sign in to
+// confirm you're not a bot" wall without PO tokens.
+const YOUTUBE_EXTRACTOR_ARGS = 'youtube:player_client=default,tv_simply,mweb';
 
 /**
  * @param {string} videoId
@@ -175,7 +191,11 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
   // 1. Metadata pass — learn what tracks exist
   let metadata;
   try {
-    metadata = await ytDlp.getVideoInfo(videoUrl, ['--skip-download', ...proxyFlags]);
+    metadata = await ytDlp.getVideoInfo(videoUrl, [
+      '--skip-download',
+      '--extractor-args', YOUTUBE_EXTRACTOR_ARGS,
+      ...proxyFlags
+    ]);
   } catch (e) {
     const msg = String(e && e.message || '');
     if (/private video|video unavailable|removed|sign in to confirm|members[- ]only|copyright|terminated/i.test(msg)) {
@@ -222,9 +242,10 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
       videoUrl,
       '--skip-download',
       sourceFlag,
-      '--sub-langs',   chosenLang,
-      '--sub-format',  'json3',
-      '-o',            outputTemplate,
+      '--sub-langs',     chosenLang,
+      '--sub-format',    'json3',
+      '-o',              outputTemplate,
+      '--extractor-args', YOUTUBE_EXTRACTOR_ARGS,
       '--no-warnings',
       '--quiet',
       ...proxyFlags
