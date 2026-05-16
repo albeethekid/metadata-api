@@ -185,21 +185,23 @@ Only videos with `score > 0` are returned, sorted by score descending.
 
 ## `GET /api/youtube/transcript`
 
-Fetch the public transcript/captions for a YouTube video for downstream analysis (e.g. piracy detection). No browser automation, no official captions API, no API key.
+Fetch the public transcript/captions for a YouTube video for downstream analysis (e.g. piracy detection). Backed by `yt-dlp`. No browser automation, no official captions API, no API key.
 
 ### Query params
 
 - `videoId` (optional if `url` is provided): YouTube video ID
 - `url` (optional if `videoId` is provided): full YouTube URL — supports `youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/shorts/...`, `youtube.com/embed/...`
 - `lang` (optional, default `en`): preferred language code
+- `proxy` (optional, default on if Oxylabs credentials exist): set `proxy=false` or `proxy=0` to bypass the proxy and call YouTube directly
 
 ### Behavior
 
-- Parses the video's watch page to discover caption tracks
+- Uses `yt-dlp` to enumerate available caption tracks, then downloads the chosen track in `json3` format
 - **Prefers manually-authored captions** over auto-generated for the requested language
 - Falls back to auto-generated captions if no manual track exists in that language
 - Falls back to any manual track in another language if none exist for the requested language
 - `text` is truncated to **100,000 characters**; the full `segments` array is always preserved
+- Both yt-dlp calls (metadata + subtitle download) are routed through the project's Oxylabs residential proxy by default. From a datacenter IP without a proxy, YouTube will frequently return a "Sign in to confirm you're not a bot" challenge that surfaces here as `404 VIDEO_UNAVAILABLE`
 
 ### Response
 

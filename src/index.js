@@ -432,11 +432,17 @@ function extractYouTubeVideoIdFromUrl(rawUrl) {
   return null;
 }
 
-// GET /api/youtube/transcript?videoId=... or ?url=...&lang=en
+// GET /api/youtube/transcript?videoId=... or ?url=...&lang=en&proxy=false
 app.get('/api/youtube/transcript', async (req, res) => {
   const urlParam = (req.query.url || '').trim() || null;
   let videoId   = (req.query.videoId || '').trim() || null;
   const lang    = (req.query.lang || 'en').trim() || 'en';
+
+  // proxy=false|0 disables Oxylabs proxy; otherwise default-on (if credentials exist)
+  let useProxy = null;
+  if (req.query.proxy !== undefined) {
+    useProxy = req.query.proxy !== 'false' && req.query.proxy !== '0';
+  }
 
   if (!videoId && urlParam) {
     videoId = extractYouTubeVideoIdFromUrl(urlParam);
@@ -450,7 +456,7 @@ app.get('/api/youtube/transcript', async (req, res) => {
   }
 
   try {
-    const { language, isGenerated, segments } = await getTranscript(videoId, lang);
+    const { language, isGenerated, segments } = await getTranscript(videoId, lang, useProxy);
 
     // Concatenated plain text, truncated to 100k chars
     const MAX_TEXT_LEN = 100_000;
@@ -2077,7 +2083,7 @@ const indexData = {
         { path: '/api/trending?regionCode=US&maxResults=10',        desc: 'Trending videos',              example: '/api/trending?regionCode=US&maxResults=5' },
         { path: '/api/youtube/discover-siblings?channelId=<CHANNEL_OR_@HANDLE>&query=<SEARCH>&maxResults=100&minScore=40', desc: 'Scan channel uploads for related content',
           example: '/api/youtube/discover-siblings?channelId=@ai-general.content177&query=Harry+Potter&maxResults=50&minScore=40' },
-        { path: '/api/youtube/transcript?videoId=<ID> | ?url=<YT_URL>&lang=en', desc: 'Fetch public captions (manual preferred over auto-gen)',
+        { path: '/api/youtube/transcript?videoId=<ID> | ?url=<YT_URL>&lang=en&proxy=false', desc: 'Fetch public captions via yt-dlp through Oxylabs proxy (manual preferred over auto-gen)',
           example: '/api/youtube/transcript?videoId=dQw4w9WgXcQ' }
       ]
     },

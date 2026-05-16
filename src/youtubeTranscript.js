@@ -128,23 +128,42 @@ function parseJson3Events(json3) {
 
 // ── Main entry point ─────────────────────────────────────────────────────────
 
+// Build the `--proxy <url>` flag pair from project's Oxylabs config.
+// Returns [] when proxy is disabled or credentials are missing.
+function buildProxyFlags(useProxy) {
+  if (useProxy === false) return [];
+  try {
+    const { getAxiosProxyConfig, isProxyEnabled } = require('./proxy-config');
+    const cfg = getAxiosProxyConfig('oxylabs', useProxy);
+    if (!cfg || !isProxyEnabled(useProxy)) return [];
+    const proxyUrl = `${cfg.protocol}://${cfg.auth.username}:${cfg.auth.password}@${cfg.host}:${cfg.port}`;
+    console.log('[YouTube transcript] Using proxy:', `${cfg.protocol}://${cfg.host}:${cfg.port}`);
+    return ['--proxy', proxyUrl];
+  } catch (e) {
+    console.warn('[YouTube transcript] Proxy config error, continuing without proxy:', e.message);
+    return [];
+  }
+}
+
 /**
  * @param {string} videoId
  * @param {string} [preferredLang='en']
+ * @param {boolean|null} [useProxy=null]  null = use default (proxy on if credentials exist), false = force off
  * @returns {Promise<{language:string,isGenerated:boolean,segments:Array}>}
  */
-async function getTranscript(videoId, preferredLang = 'en') {
+async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
   if (!videoId || typeof videoId !== 'string') {
     throw new TranscriptError('INVALID_VIDEO_ID', 'videoId is required');
   }
 
-  const ytDlp   = await getYtDlpInstance();
-  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const ytDlp      = await getYtDlpInstance();
+  const videoUrl   = `https://www.youtube.com/watch?v=${videoId}`;
+  const proxyFlags = buildProxyFlags(useProxy);
 
   // 1. Metadata pass — learn what tracks exist
   let metadata;
   try {
-    metadata = await ytDlp.getVideoInfo(videoUrl, ['--skip-download']);
+    metadata = await ytDlp.getVideoInfo(videoUrl, ['--skip-download', ...proxyFlags]);
   } catch (e) {
     const msg = String(e && e.message || '');
     if (/private video|video unavailable|removed|sign in to confirm|members[- ]only|copyright|terminated/i.test(msg)) {
@@ -198,7 +217,8 @@ async function getTranscript(videoId, preferredLang = 'en') {
       '--sub-format',  'json3',
       '-o',            outputTemplate,
       '--no-warnings',
-      '--quiet'
+      '--quiet',
+      ...proxyFlags
     ]);
   } catch (e) {
     cleanupTmp(tmpDir, tmpId);
