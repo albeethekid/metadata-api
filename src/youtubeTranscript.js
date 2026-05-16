@@ -176,6 +176,16 @@ function buildProxyFlags(useProxy) {
 // clients that are softer-checked in 2025.
 const YOUTUBE_EXTRACTOR_ARGS = 'youtube:player_client=tv_simply,mweb,web_safari,android_vr';
 
+// When `YT_DLP_IMPERSONATE` is set (e.g. on Railway, where curl_cffi is
+// installed via Dockerfile), tell yt-dlp to use a real browser TLS/HTTP
+// fingerprint. Without this, YouTube fingerprints yt-dlp's Python urllib
+// signature and bot-walls our requests even through residential proxies.
+function impersonateFlags() {
+  const target = (process.env.YT_DLP_IMPERSONATE || '').trim();
+  if (!target) return { flags: [], target: null };
+  return { flags: ['--impersonate', target], target };
+}
+
 /**
  * @param {string} videoId
  * @param {string} [preferredLang='en']
@@ -190,6 +200,8 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
   const ytDlp                   = await getYtDlpInstance();
   const videoUrl                = `https://www.youtube.com/watch?v=${videoId}`;
   const { flags: proxyFlags, info: proxyInfo } = buildProxyFlags(useProxy);
+  const { flags: impFlags, target: impTarget } = impersonateFlags();
+  proxyInfo.impersonate = impTarget;
 
   // Helper to attach proxyInfo to any TranscriptError we throw
   const fail = (code, message) => {
@@ -204,6 +216,7 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
     metadata = await ytDlp.getVideoInfo(videoUrl, [
       '--skip-download',
       '--extractor-args', YOUTUBE_EXTRACTOR_ARGS,
+      ...impFlags,
       ...proxyFlags
     ]);
   } catch (e) {
@@ -258,6 +271,7 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
       '--extractor-args', YOUTUBE_EXTRACTOR_ARGS,
       '--no-warnings',
       '--quiet',
+      ...impFlags,
       ...proxyFlags
     ]);
   } catch (e) {

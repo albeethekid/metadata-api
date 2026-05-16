@@ -7,6 +7,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
+# Install curl_cffi so yt-dlp can use --impersonate to mimic real browser
+# TLS/HTTP fingerprints. Without this, YouTube bot-walls our requests from
+# datacenter egress (even through residential proxies).
+RUN pip3 install --no-cache-dir 'curl_cffi>=0.7.0'
+
+# Signal to runtime that impersonation is available so yt-dlp gets the flag.
+ENV YT_DLP_IMPERSONATE=chrome
+
 WORKDIR /app
 
 # Create bin directory for yt-dlp binary download at runtime
