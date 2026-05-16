@@ -46,6 +46,14 @@ function getPythonPath() {
   return 'python3';
 }
 
+// Linux kernels require an absolute path in `#!`. If pythonPath is bare
+// (e.g. just "python3" because we couldn't detect an absolute Python on this
+// host — happens on Railway/Linux containers), wrap with `/usr/bin/env` so
+// the kernel can exec the shebang and `env` does PATH resolution.
+function shebangInterpreter(pythonPath) {
+  return pythonPath.startsWith('/') ? pythonPath : `/usr/bin/env ${pythonPath}`;
+}
+
 function fixYtdlpShebang(binaryPath, pythonPath) {
   try {
     const content = fs.readFileSync(binaryPath);
@@ -54,8 +62,9 @@ function fixYtdlpShebang(binaryPath, pythonPath) {
       if (content[i] === 0x0a) { newlineIndex = i; break; }
     }
     if (newlineIndex === -1 || content[0] !== 0x23 || content[1] !== 0x21) return;
-    const newShebang = Buffer.from(`#!${pythonPath}\n`);
+    const newShebang = Buffer.from(`#!${shebangInterpreter(pythonPath)}\n`);
     fs.writeFileSync(binaryPath, Buffer.concat([newShebang, content.slice(newlineIndex + 1)]));
+    try { fs.chmodSync(binaryPath, 0o755); } catch (_) {}
   } catch (e) {
     console.warn('Could not fix yt-dlp shebang:', e.message);
   }
