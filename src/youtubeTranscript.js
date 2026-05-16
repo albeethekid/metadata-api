@@ -161,10 +161,11 @@ function buildProxyFlags(useProxy) {
   }
 }
 
-// Player clients that have softer bot-detection in 2025. `tv_simply` and `mweb`
-// are the current community-recommended set for bypassing the "Sign in to
-// confirm you're not a bot" wall without PO tokens.
-const YOUTUBE_EXTRACTOR_ARGS = 'youtube:player_client=default,tv_simply,mweb';
+// Player clients that bypass the "Sign in to confirm you're not a bot" wall
+// without requiring PO tokens. We deliberately exclude `default` (which puts
+// the heavily-fingerprinted `web` client first) and focus on the TV/mobile
+// clients that are softer-checked in 2025.
+const YOUTUBE_EXTRACTOR_ARGS = 'youtube:player_client=tv_simply,mweb,web_safari,android_vr';
 
 /**
  * @param {string} videoId
