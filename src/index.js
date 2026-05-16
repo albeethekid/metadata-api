@@ -455,15 +455,17 @@ app.get('/api/youtube/transcript', async (req, res) => {
     });
   }
 
+  const debug = req.query.debug === '1' || req.query.debug === 'true';
+
   try {
-    const { language, isGenerated, segments } = await getTranscript(videoId, lang, useProxy);
+    const { language, isGenerated, segments, proxyInfo } = await getTranscript(videoId, lang, useProxy);
 
     // Concatenated plain text, truncated to 100k chars
     const MAX_TEXT_LEN = 100_000;
     const joined = segments.map(s => s.text).join(' ');
     const text   = joined.length > MAX_TEXT_LEN ? joined.slice(0, MAX_TEXT_LEN) : joined;
 
-    return res.json({
+    const payload = {
       platform: 'youtube',
       videoId,
       language,
@@ -471,9 +473,13 @@ app.get('/api/youtube/transcript', async (req, res) => {
       segmentCount: segments.length,
       text,
       segments
-    });
+    };
+    if (debug) payload._debug = { proxy: proxyInfo };
+    return res.json(payload);
   } catch (error) {
+    const proxyInfo = (error && error.proxyInfo) || null;
     if (error instanceof TranscriptError) {
+      const body = { error: error.message, code: error.code, videoId, _debug: { proxy: proxyInfo } };
       // 404: transcript missing/disabled/empty/video unavailable
       if (
         error.code === 'TRANSCRIPTS_DISABLED' ||
@@ -481,7 +487,7 @@ app.get('/api/youtube/transcript', async (req, res) => {
         error.code === 'TRANSCRIPT_EMPTY' ||
         error.code === 'VIDEO_UNAVAILABLE'
       ) {
-        return res.status(404).json({ error: error.message, code: error.code, videoId });
+        return res.status(404).json(body);
       }
       // 502: upstream failure (fetch/parse)
       if (
@@ -489,11 +495,11 @@ app.get('/api/youtube/transcript', async (req, res) => {
         error.code === 'TRANSCRIPT_FETCH_FAILED' ||
         error.code === 'PARSE_FAILED'
       ) {
-        return res.status(502).json({ error: error.message, code: error.code, videoId });
+        return res.status(502).json(body);
       }
     }
     console.error('transcript error:', error);
-    return res.status(500).json({ error: error.message, videoId });
+    return res.status(500).json({ error: error.message, videoId, _debug: { proxy: proxyInfo } });
   }
 });
 

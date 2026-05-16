@@ -129,19 +129,24 @@ function parseJson3Events(json3) {
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 // Build the `--proxy <url>` flag pair from project's Oxylabs config.
-// Returns [] when proxy is disabled or credentials are missing.
+// Returns { flags, info } so callers can surface whether the proxy was applied.
 function buildProxyFlags(useProxy) {
-  if (useProxy === false) return [];
+  if (useProxy === false) {
+    return { flags: [], info: { applied: false, reason: 'disabled by request (proxy=false)' } };
+  }
   try {
     const { getAxiosProxyConfig, isProxyEnabled } = require('./proxy-config');
     const cfg = getAxiosProxyConfig('oxylabs', useProxy);
-    if (!cfg || !isProxyEnabled(useProxy)) return [];
+    if (!cfg || !isProxyEnabled(useProxy)) {
+      return { flags: [], info: { applied: false, reason: 'no credentials / proxy disabled in config' } };
+    }
     const proxyUrl = `${cfg.protocol}://${cfg.auth.username}:${cfg.auth.password}@${cfg.host}:${cfg.port}`;
-    console.log('[YouTube transcript] Using proxy:', `${cfg.protocol}://${cfg.host}:${cfg.port}`);
-    return ['--proxy', proxyUrl];
+    const display  = `${cfg.protocol}://${cfg.host}:${cfg.port}`;
+    console.log('[YouTube transcript] Using proxy:', display);
+    return { flags: ['--proxy', proxyUrl], info: { applied: true, server: display } };
   } catch (e) {
     console.warn('[YouTube transcript] Proxy config error, continuing without proxy:', e.message);
-    return [];
+    return { flags: [], info: { applied: false, reason: `error: ${e.message}` } };
   }
 }
 
@@ -156,9 +161,16 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
     throw new TranscriptError('INVALID_VIDEO_ID', 'videoId is required');
   }
 
-  const ytDlp      = await getYtDlpInstance();
-  const videoUrl   = `https://www.youtube.com/watch?v=${videoId}`;
-  const proxyFlags = buildProxyFlags(useProxy);
+  const ytDlp                   = await getYtDlpInstance();
+  const videoUrl                = `https://www.youtube.com/watch?v=${videoId}`;
+  const { flags: proxyFlags, info: proxyInfo } = buildProxyFlags(useProxy);
+
+  // Helper to attach proxyInfo to any TranscriptError we throw
+  const fail = (code, message) => {
+    const err = new TranscriptError(code, message);
+    err.proxyInfo = proxyInfo;
+    throw err;
+  };
 
   // 1. Metadata pass — learn what tracks exist
   let metadata;
@@ -167,9 +179,9 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
   } catch (e) {
     const msg = String(e && e.message || '');
     if (/private video|video unavailable|removed|sign in to confirm|members[- ]only|copyright|terminated/i.test(msg)) {
-      throw new TranscriptError('VIDEO_UNAVAILABLE', msg.split('\n').slice(-2)[0] || 'Video unavailable');
+      fail('VIDEO_UNAVAILABLE', msg.split('\n').slice(-2)[0] || 'Video unavailable');
     }
-    throw new TranscriptError('WATCH_PAGE_FAILED', `yt-dlp metadata fetch failed: ${msg.slice(0, 300)}`);
+    fail('WATCH_PAGE_FAILED', `yt-dlp metadata fetch failed: ${msg.slice(0, 300)}`);
   }
 
   const manualSubs = metadata.subtitles          || {};
@@ -196,10 +208,7 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
       isGenerated = false;
       sourceFlag  = '--write-subs';
     } else {
-      throw new TranscriptError(
-        'TRANSCRIPTS_DISABLED',
-        'Transcripts are disabled or unavailable for this video'
-      );
+      fail('TRANSCRIPTS_DISABLED', 'Transcripts are disabled or unavailable for this video');
     }
   }
 
@@ -222,10 +231,7 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
     ]);
   } catch (e) {
     cleanupTmp(tmpDir, tmpId);
-    throw new TranscriptError(
-      'TRANSCRIPT_FETCH_FAILED',
-      `yt-dlp subtitle download failed: ${String(e && e.message || '').slice(0, 300)}`
-    );
+    fail('TRANSCRIPT_FETCH_FAILED', `yt-dlp subtitle download failed: ${String(e && e.message || '').slice(0, 300)}`);
   }
 
   // 4. Locate + read the produced file (yt-dlp may normalize lang code variants)
@@ -233,7 +239,7 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
   try {
     const files = fs.readdirSync(tmpDir).filter(f => f.startsWith(`yt-transcript-${tmpId}-`));
     if (files.length === 0) {
-      throw new TranscriptError('NO_TRANSCRIPT', 'yt-dlp ran but no transcript file was produced');
+      fail('NO_TRANSCRIPT', 'yt-dlp ran but no transcript file was produced');
     }
     // Prefer .json3, otherwise take the first
     producedFile = files.find(f => f.endsWith('.json3')) || files[0];
@@ -243,22 +249,25 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
 
     let json3;
     try { json3 = JSON.parse(fileContent); }
-    catch (e) { throw new TranscriptError('PARSE_FAILED', `Could not parse json3 file: ${e.message}`); }
+    catch (e) { fail('PARSE_FAILED', `Could not parse json3 file: ${e.message}`); }
 
     const segments = parseJson3Events(json3);
     if (segments.length === 0) {
-      throw new TranscriptError('TRANSCRIPT_EMPTY', 'Transcript exists but contains no text segments');
+      fail('TRANSCRIPT_EMPTY', 'Transcript exists but contains no text segments');
     }
 
     return {
       language: chosenLang,
       isGenerated,
-      segments
+      segments,
+      proxyInfo
     };
   } catch (e) {
     cleanupTmp(tmpDir, tmpId);
     if (e instanceof TranscriptError) throw e;
-    throw new TranscriptError('PARSE_FAILED', e.message);
+    const wrapped = new TranscriptError('PARSE_FAILED', e.message);
+    wrapped.proxyInfo = proxyInfo;
+    throw wrapped;
   }
 }
 
