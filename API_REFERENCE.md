@@ -183,6 +183,50 @@ Only videos with `score > 0` are returned, sorted by score descending.
 
 ---
 
+## `GET /api/youtube/transcript`
+
+Fetch the public transcript/captions for a YouTube video for downstream analysis (e.g. piracy detection). No browser automation, no official captions API, no API key.
+
+### Query params
+
+- `videoId` (optional if `url` is provided): YouTube video ID
+- `url` (optional if `videoId` is provided): full YouTube URL — supports `youtube.com/watch?v=...`, `youtu.be/...`, `youtube.com/shorts/...`, `youtube.com/embed/...`
+- `lang` (optional, default `en`): preferred language code
+
+### Behavior
+
+- Parses the video's watch page to discover caption tracks
+- **Prefers manually-authored captions** over auto-generated for the requested language
+- Falls back to auto-generated captions if no manual track exists in that language
+- Falls back to any manual track in another language if none exist for the requested language
+- `text` is truncated to **100,000 characters**; the full `segments` array is always preserved
+
+### Response
+
+```json
+{
+  "platform": "youtube",
+  "videoId": "abc123",
+  "language": "en",
+  "isGenerated": false,
+  "segmentCount": 142,
+  "text": "full concatenated transcript text...",
+  "segments": [
+    { "start": 0.52, "duration": 4.12, "text": "chapter one..." }
+  ]
+}
+```
+
+### Errors
+
+| Status | When |
+|---|---|
+| `400` | Neither `videoId` nor a valid YouTube `url` was provided |
+| `404` | Transcript disabled, missing, empty, or video unavailable |
+| `502` | Upstream fetch/parse failure (YouTube watch page or transcript URL) |
+
+---
+
 ## `GET /api/video/:videoId/comments`
 
 Fetch comments for a YouTube video.

@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const YouTubeClient = require('./youtubeClient');
+const { getTranscript, TranscriptError } = require('./youtubeTranscript');
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
 const { scrapeInstagramPost } = require('./instagramScraper');
@@ -407,6 +408,86 @@ app.get('/api/youtube/discover-siblings', async (req, res) => {
   } catch (error) {
     console.error('discover-siblings error:', error);
     return res.status(500).json({ error: error.message });
+  }
+});
+
+// Extract a YouTube videoId from common URL shapes:
+//   youtube.com/watch?v=ID, youtu.be/ID, youtube.com/shorts/ID, youtube.com/embed/ID
+function extractYouTubeVideoIdFromUrl(rawUrl) {
+  if (!rawUrl) return null;
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.replace(/^www\./, '');
+    if (host === 'youtu.be') {
+      return u.pathname.split('/').filter(Boolean)[0] || null;
+    }
+    if (host.endsWith('youtube.com')) {
+      if (u.searchParams.get('v')) return u.searchParams.get('v');
+      const parts = u.pathname.split('/').filter(Boolean);
+      if ((parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live') && parts[1]) {
+        return parts[1];
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+// GET /api/youtube/transcript?videoId=... or ?url=...&lang=en
+app.get('/api/youtube/transcript', async (req, res) => {
+  const urlParam = (req.query.url || '').trim() || null;
+  let videoId   = (req.query.videoId || '').trim() || null;
+  const lang    = (req.query.lang || 'en').trim() || 'en';
+
+  if (!videoId && urlParam) {
+    videoId = extractYouTubeVideoIdFromUrl(urlParam);
+  }
+
+  if (!videoId || !/^[\w-]{6,15}$/.test(videoId)) {
+    return res.status(400).json({
+      error: 'Invalid request',
+      detail: 'Provide a valid `videoId` or a YouTube `url` (watch, youtu.be, shorts).'
+    });
+  }
+
+  try {
+    const { language, isGenerated, segments } = await getTranscript(videoId, lang);
+
+    // Concatenated plain text, truncated to 100k chars
+    const MAX_TEXT_LEN = 100_000;
+    const joined = segments.map(s => s.text).join(' ');
+    const text   = joined.length > MAX_TEXT_LEN ? joined.slice(0, MAX_TEXT_LEN) : joined;
+
+    return res.json({
+      platform: 'youtube',
+      videoId,
+      language,
+      isGenerated,
+      segmentCount: segments.length,
+      text,
+      segments
+    });
+  } catch (error) {
+    if (error instanceof TranscriptError) {
+      // 404: transcript missing/disabled/empty/video unavailable
+      if (
+        error.code === 'TRANSCRIPTS_DISABLED' ||
+        error.code === 'NO_TRANSCRIPT' ||
+        error.code === 'TRANSCRIPT_EMPTY' ||
+        error.code === 'VIDEO_UNAVAILABLE'
+      ) {
+        return res.status(404).json({ error: error.message, code: error.code, videoId });
+      }
+      // 502: upstream failure (fetch/parse)
+      if (
+        error.code === 'WATCH_PAGE_FAILED' ||
+        error.code === 'TRANSCRIPT_FETCH_FAILED' ||
+        error.code === 'PARSE_FAILED'
+      ) {
+        return res.status(502).json({ error: error.message, code: error.code, videoId });
+      }
+    }
+    console.error('transcript error:', error);
+    return res.status(500).json({ error: error.message, videoId });
   }
 });
 
@@ -1973,44 +2054,171 @@ app.get('/api/screenshot', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => {
-  res.json({
-    message: 'Social Media Metadata API Server',
-    ui: {
-      csvGenerator: '/csv.html (Batch process URLs and download CSV)',
-      channelSearch: '/channels.html (YouTube channel search CSV export)',
-      screenshotTool: '/screenshot.html (Take screenshots and get public URLs or download CSV)',
-      discoverSiblings: '/discover-siblings.html (Upload SERP CSV to find related videos on same channel)'
+// ── Root index: HTML overview with clickable links + ?format=json fallback ──
+const indexData = {
+  message: 'Social Media Metadata API Server',
+  uiTools: [
+    { path: '/csv.html',                name: 'CSV Generator',       desc: 'Batch process URLs and download CSV' },
+    { path: '/channels.html',           name: 'Channel Search',      desc: 'YouTube channel search CSV export' },
+    { path: '/screenshot.html',         name: 'Screenshot Tool',     desc: 'Take screenshots and get public URLs or download CSV' },
+    { path: '/discover-siblings.html',  name: 'Sibling Discovery',   desc: 'Upload SERP CSV to find related videos on the same channel' }
+  ],
+  groups: [
+    {
+      name: 'YouTube',
+      endpoints: [
+        { path: '/api/video/:videoId?verbose=1',                    desc: 'Video metadata',               example: '/api/video/dQw4w9WgXcQ' },
+        { path: '/api/video/:videoId/comments?maxResults=20',       desc: 'Video comments',               example: '/api/video/dQw4w9WgXcQ/comments?maxResults=10' },
+        { path: '/api/search?q=...&maxResults=10',                  desc: 'Video search',                 example: '/api/search?q=lord+of+the+rings&maxResults=5' },
+        { path: '/api/search/channels?q=...&maxResults=10',         desc: 'Channel search',               example: '/api/search/channels?q=tolkien&maxResults=5' },
+        { path: '/api/channel/:channelId',                          desc: 'Channel details' },
+        { path: '/api/channel/:channelId/videos?maxResults=10',     desc: 'Channel recent videos' },
+        { path: '/api/playlist/:playlistId?maxResults=50',          desc: 'Playlist items' },
+        { path: '/api/trending?regionCode=US&maxResults=10',        desc: 'Trending videos',              example: '/api/trending?regionCode=US&maxResults=5' },
+        { path: '/api/youtube/discover-siblings?channelId=<CHANNEL_OR_@HANDLE>&query=<SEARCH>&maxResults=100&minScore=40', desc: 'Scan channel uploads for related content',
+          example: '/api/youtube/discover-siblings?channelId=@ai-general.content177&query=Harry+Potter&maxResults=50&minScore=40' },
+        { path: '/api/youtube/transcript?videoId=<ID> | ?url=<YT_URL>&lang=en', desc: 'Fetch public captions (manual preferred over auto-gen)',
+          example: '/api/youtube/transcript?videoId=dQw4w9WgXcQ' }
+      ]
     },
-    endpoints: {
-      chartmetric: '/api/chartmetric/metadata?url=<SPOTIFY_URL>&verbose=1 (Spotify tracks, albums, artists, playlists - includes streaming data)',
-      spotify: '/api/spotify/metadata?url=<SPOTIFY_URL>&verbose=1 (Spotify shows, episodes - use Chartmetric for tracks/albums/artists/playlists)',
-      video: '/api/video/:videoId?verbose=1 (YouTube video metadata)',
-      search: '/api/search?q=query&maxResults=10 (YouTube video search)',
-      searchChannels: '/api/search/channels?q=query&maxResults=10 (YouTube channel search)',
-      channelVideos: '/api/channel/:channelId/videos?maxResults=10',
-      trending: '/api/trending?regionCode=US&maxResults=10',
-      videoComments: '/api/video/:videoId/comments?maxResults=20',
-      channel: '/api/channel/:channelId',
-      playlist: '/api/playlist/:playlistId?maxResults=50',
-      tiktok: '/api/tiktok/video/metrics?url=<URL_ENCODED_TIKTOK_URL>',
-      tiktokYtdlp: '/api/tiktok/ytdlp?url=<URL_ENCODED_TIKTOK_URL> (uses yt-dlp)',
-      tiktokProfiles: '/api/tiktok/profiles?query=<SEARCH_TERM> (EnsembleData discovery)',
-      instagramProfiles: '/api/instagram/profiles?query=<SEARCH_TERM> (EnsembleData discovery + Apify enrichment)',
-      twitterProfiles: '/api/twitter/profiles?query=<SEARCH_TERM> (Apify xtdata/twitter-x-scraper)',
-      instagram: '/api/instagram/video?url=<URL_ENCODED_INSTAGRAM_URL>',
-      instagramApify: '/api/instagram/video/apify?url=<URL_ENCODED_INSTAGRAM_URL>&verbose=1 (Apify instagram-scraper)',
-      discoverSiblings: '/api/youtube/discover-siblings?channelId=<CHANNEL_ID_OR_@HANDLE>&query=<SEARCH_TERM>&maxResults=100&minScore=40 (scan channel uploads for related content)',
-      screenshot: '/api/screenshot?url=<URL_ENCODED_URL>&download=1&fullPage=1'
+    {
+      name: 'TikTok',
+      endpoints: [
+        { path: '/api/tiktok/video/metrics?url=<URL>',     desc: 'Video metrics' },
+        { path: '/api/tiktok/ytdlp?url=<URL>',             desc: 'Video metadata via yt-dlp' },
+        { path: '/api/tiktok/profiles?query=<TERM>',       desc: 'Profile discovery (EnsembleData)',
+          example: '/api/tiktok/profiles?query=tolkien' }
+      ]
     },
-    examples: {
-      chartmetricTrack: '/api/chartmetric/metadata?url=https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp',
-      chartmetricArtist: '/api/chartmetric/metadata?url=https://open.spotify.com/artist/7dIxU1XgxBIa3KJAWzaFAC',
-      spotifyEpisode: '/api/spotify/metadata?url=https://open.spotify.com/episode/0L5BZId2ySpX6Ni64dbbhw',
-      youtube: '/api/video/dQw4w9WgXcQ',
-      tiktok: '/api/tiktok/video/metrics?url=https://www.tiktok.com/@user/video/1234567890'
+    {
+      name: 'Instagram',
+      endpoints: [
+        { path: '/api/instagram/video?url=<URL>',                       desc: 'Video/post metadata' },
+        { path: '/api/instagram/video/apify?url=<URL>&verbose=1',       desc: 'Via Apify instagram-scraper' },
+        { path: '/api/instagram/profiles?query=<TERM>',                 desc: 'Profile discovery (EnsembleData + Apify enrichment)',
+          example: '/api/instagram/profiles?query=tolkien' }
+      ]
+    },
+    {
+      name: 'Twitter / X',
+      endpoints: [
+        { path: '/api/twitter/profiles?query=<TERM>', desc: 'Profile discovery (Apify xtdata/twitter-x-scraper)',
+          example: '/api/twitter/profiles?query=tolkien' }
+      ]
+    },
+    {
+      name: 'Music',
+      endpoints: [
+        { path: '/api/chartmetric/metadata?url=<SPOTIFY_URL>&verbose=1', desc: 'Spotify tracks/albums/artists/playlists + streaming data',
+          example: '/api/chartmetric/metadata?url=https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp' },
+        { path: '/api/spotify/metadata?url=<SPOTIFY_URL>&verbose=1', desc: 'Spotify shows / episodes',
+          example: '/api/spotify/metadata?url=https://open.spotify.com/episode/0L5BZId2ySpX6Ni64dbbhw' }
+      ]
+    },
+    {
+      name: 'Utility',
+      endpoints: [
+        { path: '/api/screenshot?url=<URL>&download=1&fullPage=1', desc: 'Screenshot any web page',
+          example: '/api/screenshot?url=https%3A%2F%2Fexample.com&fullPage=1' },
+        { path: '/api/proxy/status', desc: 'Proxy configuration debug info',
+          example: '/api/proxy/status' }
+      ]
     }
-  });
+  ]
+};
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderIndexHtml(data) {
+  const uiCards = data.uiTools.map(t => `
+    <a class="card" href="${escapeHtml(t.path)}">
+      <div class="card-title">${escapeHtml(t.name)}</div>
+      <div class="card-path"><code>${escapeHtml(t.path)}</code></div>
+      <div class="card-desc">${escapeHtml(t.desc)}</div>
+    </a>`).join('');
+
+  const groupSections = data.groups.map(g => {
+    const rows = g.endpoints.map(ep => {
+      const tryLink = ep.example
+        ? `<a class="try" href="${escapeHtml(ep.example)}" target="_blank" rel="noopener">Try →</a>`
+        : `<span class="try-disabled" title="No example available">—</span>`;
+      return `
+        <tr>
+          <td class="ep-path"><code>${escapeHtml(ep.path)}</code></td>
+          <td class="ep-desc">${escapeHtml(ep.desc || '')}</td>
+          <td class="ep-try">${tryLink}</td>
+        </tr>`;
+    }).join('');
+    return `
+      <section>
+        <h2>${escapeHtml(g.name)}</h2>
+        <table>
+          <thead><tr><th>Endpoint</th><th>Description</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </section>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(data.message)}</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 32px auto; max-width: 1100px; padding: 0 20px; line-height: 1.5; color: #222; }
+    h1 { margin: 0 0 4px; }
+    p.lead { margin: 0 0 24px; color: #666; }
+    h2 { margin: 32px 0 10px; padding-bottom: 4px; border-bottom: 1px solid #ddd; color: #333; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin: 12px 0 24px; }
+    .card { display: block; padding: 14px 16px; border: 1px solid #ddd; border-radius: 8px; text-decoration: none; color: inherit; background: #fafafa; transition: background 0.15s, border-color 0.15s; }
+    .card:hover { background: #f0f4ff; border-color: #99b2ff; }
+    .card-title { font-weight: 600; color: #1a4dcc; }
+    .card-path { font-size: 12px; color: #666; margin: 2px 0 6px; }
+    .card-desc { font-size: 13px; color: #444; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; vertical-align: top; }
+    th { font-size: 12px; text-transform: uppercase; color: #888; font-weight: 600; }
+    code { background: #f4f4f4; padding: 2px 6px; border-radius: 4px; font-size: 13px; word-break: break-all; }
+    .ep-path { width: 50%; }
+    .ep-desc { color: #555; }
+    .ep-try { width: 70px; text-align: right; white-space: nowrap; }
+    .try { display: inline-block; padding: 4px 10px; background: #1a4dcc; color: white; border-radius: 4px; text-decoration: none; font-size: 12px; }
+    .try:hover { background: #133da6; }
+    .try-disabled { color: #ccc; font-size: 16px; }
+    footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #eee; font-size: 13px; color: #888; }
+    footer a { color: #1a4dcc; }
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(data.message)}</h1>
+  <p class="lead">Browse the UI tools and try API endpoints directly. Append <code>?format=json</code> to this page for the machine-readable index.</p>
+
+  <h2>UI Tools</h2>
+  <div class="cards">${uiCards}</div>
+
+  ${groupSections}
+
+  <footer>
+    See <code>API_REFERENCE.md</code> in the repo for full parameter docs.
+    JSON index: <a href="/?format=json">/?format=json</a>
+  </footer>
+</body>
+</html>`;
+}
+
+app.get('/', (req, res) => {
+  if (req.query.format === 'json') {
+    return res.json(indexData);
+  }
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.send(renderIndexHtml(indexData));
 });
 
 // Debug endpoint to verify proxy configuration
