@@ -402,6 +402,42 @@ except Exception as e:
     const combined = String((e.stdout || '') + (e.stderr || '') + (e.message || ''));
     out.ytdlpVerbose = combined.split('\n').slice(0, 60);
   }
+  // Run yt-dlp's INTERNAL curl_cffi import path explicitly to capture the
+  // real ImportError. yt-dlp marks targets "unavailable" silently — this
+  // tears the cover off.
+  try {
+    const { execFileSync } = require('child_process');
+    const zipappPath = getBinaryPath();
+    const probe = `
+import sys, traceback
+sys.path.insert(0, ${JSON.stringify(zipappPath)})
+attempts = [
+  ("yt_dlp.networking._curlcffi", None),
+  ("yt_dlp.networking.impersonate", None),
+]
+for mod, _ in attempts:
+    try:
+        __import__(mod)
+        print("IMPORT_OK:", mod)
+    except Exception as e:
+        print("IMPORT_ERR:", mod, type(e).__name__, str(e))
+        traceback.print_exc()
+# Then try the actual class
+try:
+    from yt_dlp.networking._curlcffi import CurlCFFIRH
+    print("CURL_CFFI_RH_OK")
+except Exception as e:
+    print("CURL_CFFI_RH_ERR:", type(e).__name__, str(e))
+    traceback.print_exc()
+`.trim();
+    const result = execFileSync(getPythonPath(), ['-c', probe], {
+      encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'pipe']
+    });
+    out.zipappProbe = result.split('\n').slice(0, 80);
+  } catch (e) {
+    const combined = String((e.stdout || '') + (e.stderr || '') + (e.message || ''));
+    out.zipappProbe = combined.split('\n').slice(0, 80);
+  }
   return out;
 }
 
