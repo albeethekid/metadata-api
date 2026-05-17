@@ -10,12 +10,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install curl_cffi so yt-dlp can use --impersonate to mimic real browser
 # TLS/HTTP fingerprints. Without this, YouTube bot-walls our requests from
 # datacenter egress (even through residential proxies).
-# Use `python3 -m pip` (not bare pip3) so we install into the same Python
-# that yt-dlp runs under. Verify the import works at build time so a silent
-# pip failure can't slip through.
-RUN python3 -m pip install --no-cache-dir --upgrade pip \
- && python3 -m pip install --no-cache-dir 'curl_cffi>=0.7.0' \
- && python3 -c "import curl_cffi; print('curl_cffi', curl_cffi.__version__, 'OK')"
+#
+# We install to an explicit location and expose it via PYTHONPATH so the
+# package is visible to ANY Python invocation (root or non-root). The
+# Playwright base image switches to `pwuser` at runtime — a default
+# `--user` install as root wouldn't be on pwuser's sys.path.
+RUN python3 -m pip install --no-cache-dir \
+      --target=/opt/python-packages \
+      'curl_cffi>=0.7.0' \
+ && PYTHONPATH=/opt/python-packages python3 -c \
+      "import curl_cffi, sys; print('curl_cffi', curl_cffi.__version__, 'at', curl_cffi.__file__)"
+
+ENV PYTHONPATH=/opt/python-packages
 
 # Signal to runtime that impersonation is available so yt-dlp gets the flag.
 # Use a specific Chrome target — bare 'chrome' may not match in older yt-dlp.
