@@ -333,7 +333,9 @@ async function getDiagnostics() {
   const out = {
     binaryPath:    getBinaryPath(),
     pythonPath:    getPythonPath(),
-    envImpersonate: process.env.YT_DLP_IMPERSONATE || null
+    envImpersonate: process.env.YT_DLP_IMPERSONATE || null,
+    envPythonPath:  process.env.PYTHONPATH || null,
+    runningAsUser:  (() => { try { return require('os').userInfo().username; } catch (_) { return 'unknown'; } })()
   };
   try {
     out.version = (await ytDlp.execPromise(['--version'])).trim();
@@ -348,6 +350,30 @@ async function getDiagnostics() {
       .filter(l => l && !/^client/i.test(l) && !/^---/.test(l));
   } catch (e) {
     out.impersonateError = String(e && e.message || '').slice(0, 500);
+  }
+  // Spawn the same Python that yt-dlp uses and ask it directly: can you
+  // import curl_cffi, and where does sys.path look?
+  try {
+    const { execFileSync } = require('child_process');
+    const pyProbe = `
+import sys, os
+print("PY_EXEC=", sys.executable)
+print("PY_VERSION=", sys.version.split()[0])
+print("PYTHONPATH_ENV=", os.environ.get("PYTHONPATH"))
+print("SYS_PATH=", sys.path)
+try:
+    import curl_cffi
+    print("CURL_CFFI_OK=", curl_cffi.__version__, "AT", curl_cffi.__file__)
+except Exception as e:
+    print("CURL_CFFI_ERR=", type(e).__name__, str(e))
+`.trim();
+    const stdout = execFileSync(getPythonPath(), ['-c', pyProbe], {
+      encoding: 'utf8',
+      timeout: 5000
+    });
+    out.pythonProbe = stdout.split('\n').filter(Boolean);
+  } catch (e) {
+    out.pythonProbeError = String(e && e.message || '').slice(0, 500);
   }
   return out;
 }
