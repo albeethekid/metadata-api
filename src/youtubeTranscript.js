@@ -325,4 +325,31 @@ function cleanupTmp(tmpDir, tmpId) {
   } catch (_) {}
 }
 
-module.exports = { getTranscript, TranscriptError };
+// Diagnostic helper: returns yt-dlp version and the list of impersonate
+// targets available in the runtime (depends on whether curl_cffi is
+// installed and which version). Used by /api/youtube/transcript/diag.
+async function getDiagnostics() {
+  const ytDlp = await getYtDlpInstance();
+  const out = {
+    binaryPath:    getBinaryPath(),
+    pythonPath:    getPythonPath(),
+    envImpersonate: process.env.YT_DLP_IMPERSONATE || null
+  };
+  try {
+    out.version = (await ytDlp.execPromise(['--version'])).trim();
+  } catch (e) {
+    out.versionError = String(e && e.message || '').slice(0, 500);
+  }
+  try {
+    const raw = await ytDlp.execPromise(['--list-impersonate-targets']);
+    out.impersonateTargets = raw
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l && !/^client/i.test(l) && !/^---/.test(l));
+  } catch (e) {
+    out.impersonateError = String(e && e.message || '').slice(0, 500);
+  }
+  return out;
+}
+
+module.exports = { getTranscript, TranscriptError, getDiagnostics };

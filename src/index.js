@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const YouTubeClient = require('./youtubeClient');
-const { getTranscript, TranscriptError } = require('./youtubeTranscript');
+const { getTranscript, TranscriptError, getDiagnostics } = require('./youtubeTranscript');
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
 const { scrapeInstagramPost } = require('./instagramScraper');
@@ -500,6 +500,17 @@ app.get('/api/youtube/transcript', async (req, res) => {
     }
     console.error('transcript error:', error);
     return res.status(500).json({ error: error.message, videoId, _debug: { proxy: proxyInfo } });
+  }
+});
+
+// Diagnostic: returns yt-dlp version + available impersonate targets so we
+// can verify curl_cffi is loaded and chrome variants are advertised.
+app.get('/api/youtube/transcript/diag', async (req, res) => {
+  try {
+    const diag = await getDiagnostics();
+    return res.json(diag);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
   }
 });
 
