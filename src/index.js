@@ -505,7 +505,12 @@ app.get('/api/youtube/transcript', async (req, res) => {
 
 // Diagnostic: returns yt-dlp version + available impersonate targets so we
 // can verify curl_cffi is loaded and chrome variants are advertised.
+// Gated behind ENABLE_DIAG=1 since the response leaks internals (sys.path,
+// package locations). 404 when disabled so the endpoint isn't discoverable.
 app.get('/api/youtube/transcript/diag', async (req, res) => {
+  if (process.env.ENABLE_DIAG !== '1') {
+    return res.status(404).json({ error: 'Not found' });
+  }
   try {
     const diag = await getDiagnostics();
     return res.json(diag);
