@@ -276,7 +276,7 @@ async function getTranscript(videoId, preferredLang = 'en', useProxy = null) {
     ]);
   } catch (e) {
     cleanupTmp(tmpDir, tmpId);
-    fail('TRANSCRIPT_FETCH_FAILED', `yt-dlp subtitle download failed: ${String(e && e.message || '').slice(0, 300)}`);
+    fail('TRANSCRIPT_FETCH_FAILED', `yt-dlp subtitle download failed: ${String(e && e.message || '').slice(0, 2000)}`);
   }
 
   // 4. Locate + read the produced file (yt-dlp may normalize lang code variants)
