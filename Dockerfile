@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Use `python3 -m pip` (not bare pip3) so we install into the same Python
 # that yt-dlp runs under. Verify the import works at build time so a silent
 # pip failure can't slip through.
-RUN python3 -m pip install --no-cache-dir --break-system-packages 'curl_cffi>=0.7.0' \
+RUN python3 -m pip install --no-cache-dir --upgrade pip \
+ && python3 -m pip install --no-cache-dir 'curl_cffi>=0.7.0' \
  && python3 -c "import curl_cffi; print('curl_cffi', curl_cffi.__version__, 'OK')"
 
 # Signal to runtime that impersonation is available so yt-dlp gets the flag.
