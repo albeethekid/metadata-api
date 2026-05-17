@@ -352,11 +352,11 @@ async function getDiagnostics() {
     out.impersonateError = String(e && e.message || '').slice(0, 500);
   }
   // Spawn the same Python that yt-dlp uses and ask it directly: can you
-  // import curl_cffi, and where does sys.path look?
+  // import curl_cffi (and its actual backend), and where does sys.path look?
   try {
     const { execFileSync } = require('child_process');
     const pyProbe = `
-import sys, os
+import sys, os, traceback
 print("PY_EXEC=", sys.executable)
 print("PY_VERSION=", sys.version.split()[0])
 print("PYTHONPATH_ENV=", os.environ.get("PYTHONPATH"))
@@ -366,14 +366,41 @@ try:
     print("CURL_CFFI_OK=", curl_cffi.__version__, "AT", curl_cffi.__file__)
 except Exception as e:
     print("CURL_CFFI_ERR=", type(e).__name__, str(e))
+    traceback.print_exc()
+try:
+    from curl_cffi import requests as _r
+    print("CURL_CFFI_REQUESTS_OK at", _r.__file__)
+except Exception as e:
+    print("CURL_CFFI_REQUESTS_ERR=", type(e).__name__, str(e))
+    traceback.print_exc()
+try:
+    from curl_cffi.requests import Session
+    s = Session(impersonate="chrome124")
+    print("CURL_CFFI_SESSION_OK")
+except Exception as e:
+    print("CURL_CFFI_SESSION_ERR=", type(e).__name__, str(e))
+    traceback.print_exc()
 `.trim();
     const stdout = execFileSync(getPythonPath(), ['-c', pyProbe], {
       encoding: 'utf8',
-      timeout: 5000
+      timeout: 8000,
+      stdio: ['ignore', 'pipe', 'pipe']
     });
     out.pythonProbe = stdout.split('\n').filter(Boolean);
   } catch (e) {
-    out.pythonProbeError = String(e && e.message || '').slice(0, 500);
+    out.pythonProbeError = String(e && (e.stdout || '') + (e.stderr || '') + e.message || '').slice(0, 2000);
+  }
+  // Capture yt-dlp's own verbose loader output so we see WHY it marks
+  // each impersonate backend as unavailable.
+  try {
+    const { execFileSync } = require('child_process');
+    const result = execFileSync(getPythonPath(), [
+      getBinaryPath(), '-v', '--list-impersonate-targets'
+    ], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'pipe'] });
+    out.ytdlpVerbose = result.split('\n').slice(0, 60);
+  } catch (e) {
+    const combined = String((e.stdout || '') + (e.stderr || '') + (e.message || ''));
+    out.ytdlpVerbose = combined.split('\n').slice(0, 60);
   }
   return out;
 }
