@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `--user` install as root wouldn't be on pwuser's sys.path.
 RUN python3 -m pip install --no-cache-dir \
       --target=/opt/python-packages \
-      'curl_cffi>=0.5.10,!=0.6.*,<0.8' \
+      'curl_cffi>=0.10,<0.15' \
  && PYTHONPATH=/opt/python-packages python3 -c \
       "import curl_cffi, sys; print('curl_cffi', curl_cffi.__version__, 'at', curl_cffi.__file__)"
 
