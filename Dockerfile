@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `--user` install as root wouldn't be on pwuser's sys.path.
 RUN python3 -m pip install --no-cache-dir \
       --target=/opt/python-packages \
-      'curl_cffi>=0.7.0' \
+      'curl_cffi>=0.5.10,!=0.6.*,<0.8' \
  && PYTHONPATH=/opt/python-packages python3 -c \
       "import curl_cffi, sys; print('curl_cffi', curl_cffi.__version__, 'at', curl_cffi.__file__)"
 
@@ -25,7 +25,7 @@ ENV PYTHONPATH=/opt/python-packages
 
 # Signal to runtime that impersonation is available so yt-dlp gets the flag.
 # Use a specific Chrome target — bare 'chrome' may not match in older yt-dlp.
-ENV YT_DLP_IMPERSONATE=chrome-124
+ENV YT_DLP_IMPERSONATE=chrome-110
 
 WORKDIR /app
 
