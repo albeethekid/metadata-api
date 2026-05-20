@@ -5,6 +5,8 @@ const { getTranscript, TranscriptError, getDiagnostics } = require('./youtubeTra
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
 const { scrapeInstagramPost } = require('./instagramScraper');
+const { extractSpreadsheetId, readReportTab, writeRowMappedValues } = require('./sheetsService');
+const { processUrl } = require('./urlProcessor');
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 8080;
@@ -517,6 +519,74 @@ app.get('/api/youtube/transcript/diag', async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
+});
+
+// ── Google Sheets Processor ─────────────────────────────────────────────
+// Backs public/sheets.html. The UI calls preflight once to validate the
+// Sheet and discover rows, then calls process-row per row to fetch metadata
+// (via the same backend endpoints CSV Generator uses) and write results
+// back into the `report` tab.
+
+// POST { sheetUrl }
+//   → { spreadsheetId, headers, headerIndex, rows: [{ rowIndex, pageUrl }, ...] }
+app.post('/api/sheets/preflight', async (req, res) => {
+  const sheetUrl = req.body && req.body.sheetUrl;
+  if (!sheetUrl) {
+    return res.status(400).json({ error: 'MISSING_SHEET_URL', message: 'Field "sheetUrl" is required.' });
+  }
+  const spreadsheetId = extractSpreadsheetId(sheetUrl);
+  if (!spreadsheetId) {
+    return res.status(400).json({
+      error: 'INVALID_SHEET_URL',
+      message: 'Could not extract a spreadsheetId from this URL. Expected a https://docs.google.com/spreadsheets/d/<id>/... URL.'
+    });
+  }
+  try {
+    const result = await readReportTab(spreadsheetId);
+    return res.json(result);
+  } catch (e) {
+    return res.status(e.status || 500).json({
+      error: e.code || 'PREFLIGHT_FAILED',
+      message: e.message
+    });
+  }
+});
+
+// POST { spreadsheetId, rowIndex, pageUrl, headerIndex }
+//   → { ok, rowIndex, platform, error?, message? }
+// Always returns 200 with `ok: false` on per-row failures (so the UI can
+// keep going across the batch). 4xx/5xx are reserved for protocol-level
+// problems (bad request, sheet write failed entirely).
+app.post('/api/sheets/process-row', async (req, res) => {
+  const { spreadsheetId, rowIndex, pageUrl, headerIndex } = req.body || {};
+  if (!spreadsheetId || !rowIndex || !pageUrl || !headerIndex) {
+    return res.status(400).json({
+      error: 'MISSING_FIELDS',
+      message: 'spreadsheetId, rowIndex, pageUrl and headerIndex are all required.'
+    });
+  }
+
+  const result = await processUrl(pageUrl);
+  const errorDetail = result.ok ? null : `${result.error}: ${result.message}`;
+
+  try {
+    await writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, result.normalized, errorDetail);
+  } catch (e) {
+    return res.status(e.status || 500).json({
+      ok: false,
+      rowIndex,
+      error: e.code || 'WRITE_FAILED',
+      message: e.message
+    });
+  }
+
+  return res.json({
+    ok: result.ok,
+    rowIndex,
+    platform: result.platform,
+    error: result.ok ? null : result.error,
+    message: result.ok ? null : result.message
+  });
 });
 
 // curl "http://localhost:3000/api/tiktok/video/metrics?url=https%3A%2F%2Fwww.tiktok.com%2F%40yaroslavslonsky%2Fvideo%2F7568246874558237965"
@@ -2087,6 +2157,7 @@ const indexData = {
   message: 'Social Media Metadata API Server',
   uiTools: [
     { path: '/csv.html',                name: 'CSV Generator',       desc: 'Batch process URLs and download CSV' },
+    { path: '/sheets.html',             name: 'Sheets Processor',    desc: 'Process URLs from a Google Sheet `report` tab and write metadata back' },
     { path: '/channels.html',           name: 'Channel Search',      desc: 'YouTube channel search CSV export' },
     { path: '/screenshot.html',         name: 'Screenshot Tool',     desc: 'Take screenshots and get public URLs or download CSV' },
     { path: '/discover-siblings.html',  name: 'Sibling Discovery',   desc: 'Upload SERP CSV to find related videos on the same channel' }

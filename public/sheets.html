@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Google Sheets Processor</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; max-width: 980px; }
+    h1 { margin-bottom: 8px; }
+    input[type="text"] { width: 100%; padding: 10px; box-sizing: border-box; font-family: monospace; font-size: 14px; }
+    button { padding: 10px 16px; font-size: 14px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .row { margin: 12px 0; }
+    .status { margin-top: 8px; font-size: 14px; color: #444; }
+    .muted { color: #666; font-size: 13px; }
+    .ok { color: #1a7f37; }
+    .err { color: #b42318; }
+    .panel { border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; background: #fafafa; margin-top: 12px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { background: #f3f3f3; font-weight: 600; }
+    .row-status { width: 90px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+    .pill.pending  { background: #f0f0f0; color: #555; }
+    .pill.running  { background: #fff7d6; color: #8a6d00; }
+    .pill.ok       { background: #dcfce7; color: #166534; }
+    .pill.err      { background: #fde2e2; color: #b42318; }
+    .url-cell { max-width: 440px; word-break: break-all; font-family: monospace; font-size: 12px; }
+    .err-cell { max-width: 360px; color: #b42318; font-size: 12px; }
+    pre.help { background: #f6f8fa; padding: 10px; border-radius: 6px; font-size: 12px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>Google Sheets Processor</h1>
+  <p class="muted">
+    Process a Google Sheet's <code>report</code> tab. Reads URLs from the
+    <code>page_url</code> column and writes normalized metadata back into the same row.
+    Uses the same backend endpoints as the
+    <a href="/csv.html">CSV Generator</a>.
+  </p>
+
+  <details class="panel">
+    <summary><strong>Setup &amp; column mapping</strong></summary>
+    <p>
+      Share your Sheet with this service account (Editor access):<br />
+      <code id="svc-email">vermillioserviceaccount@vermillio.iam.gserviceaccount.com</code>
+    </p>
+    <p>The <code>report</code> tab is read from / written to. Columns are matched by header name, never by position. These headers are written when present:</p>
+    <pre class="help">Title          ← title (normalized)
+content_url    ← heroImageUrl
+likeness_match ← channelHandle (blank if N/A)
+likeness_label ← durationIso   (blank if N/A)
+likeness_score ← viewCount
+recommendation ← publishedAt
+error          ← likeCount
+stacktrace     ← failure detail (blank on success)</pre>
+    <p class="muted">Missing columns in your Sheet are skipped silently. Only <code>page_url</code> is required.</p>
+  </details>
+
+  <div class="row">
+    <label for="sheet-url"><strong>Google Sheet URL</strong></label>
+    <input type="text" id="sheet-url" placeholder="https://docs.google.com/spreadsheets/d/<id>/edit#gid=0" />
+  </div>
+  <div class="row">
+    <button id="preflight-btn">Validate Sheet</button>
+    <button id="run-btn" disabled>Process Rows</button>
+    <span id="overall-status" class="status muted"></span>
+  </div>
+
+  <div id="preflight-summary" class="panel" style="display: none;"></div>
+
+  <table id="rows-table" style="display: none;">
+    <thead>
+      <tr>
+        <th class="row-status">Status</th>
+        <th>Row</th>
+        <th>page_url</th>
+        <th>Platform</th>
+        <th>Detail</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    const API_BASE = '';
+    const CONCURRENCY = 5;
+
+    const sheetInput      = document.getElementById('sheet-url');
+    const preflightBtn    = document.getElementById('preflight-btn');
+    const runBtn          = document.getElementById('run-btn');
+    const overallStatus   = document.getElementById('overall-status');
+    const preflightSummary = document.getElementById('preflight-summary');
+    const rowsTable       = document.getElementById('rows-table');
+    const rowsTbody       = rowsTable.querySelector('tbody');
+
+    let preflight = null; // { spreadsheetId, headers, headerIndex, rows }
+
+    function setOverall(text, cls) {
+      overallStatus.textContent = text;
+      overallStatus.className = 'status ' + (cls || 'muted');
+    }
+
+    function renderPreflightSummary(pf) {
+      const knownHeaders = ['Title','content_url','likeness_match','likeness_label','likeness_score','recommendation','error','stacktrace'];
+      const present = knownHeaders.filter(h => h in pf.headerIndex);
+      const missing = knownHeaders.filter(h => !(h in pf.headerIndex));
+      preflightSummary.style.display = 'block';
+      preflightSummary.innerHTML =
+        `<div><strong>Spreadsheet:</strong> <code>${pf.spreadsheetId}</code></div>` +
+        `<div><strong>Rows with page_url:</strong> ${pf.rows.length}</div>` +
+        `<div><strong>Writable headers found:</strong> ${present.join(', ') || '(none)'}</div>` +
+        (missing.length
+          ? `<div class="muted"><strong>Headers not in sheet (will be skipped):</strong> ${missing.join(', ')}</div>`
+          : '');
+    }
+
+    function renderRows(rows) {
+      rowsTbody.innerHTML = '';
+      rowsTable.style.display = rows.length ? 'table' : 'none';
+      for (const row of rows) {
+        const tr = document.createElement('tr');
+        tr.dataset.rowIndex = String(row.rowIndex);
+        tr.innerHTML =
+          `<td><span class="pill pending">pending</span></td>` +
+          `<td>${row.rowIndex}</td>` +
+          `<td class="url-cell"></td>` +
+          `<td></td>` +
+          `<td class="err-cell"></td>`;
+        tr.children[2].textContent = row.pageUrl;
+        rowsTbody.appendChild(tr);
+      }
+    }
+
+    function updateRowStatus(rowIndex, status, { platform, error, message } = {}) {
+      const tr = rowsTbody.querySelector(`tr[data-row-index="${rowIndex}"]`);
+      if (!tr) return;
+      const pill = tr.children[0].querySelector('.pill');
+      pill.className = 'pill ' + status;
+      pill.textContent = status;
+      tr.children[3].textContent = platform || '';
+      if (status === 'err') {
+        tr.children[4].textContent = `${error || ''}: ${message || ''}`.replace(/^:\s*/, '');
+      } else if (status === 'ok') {
+        tr.children[4].textContent = '';
+      }
+    }
+
+    async function preflightSheet() {
+      const sheetUrl = sheetInput.value.trim();
+      if (!sheetUrl) { setOverall('Paste a Google Sheet URL first.', 'err'); return; }
+
+      preflightBtn.disabled = true;
+      runBtn.disabled = true;
+      setOverall('Validating…', 'muted');
+      preflightSummary.style.display = 'none';
+      rowsTable.style.display = 'none';
+      rowsTbody.innerHTML = '';
+
+      let res, body;
+      try {
+        res = await fetch(`${API_BASE}/api/sheets/preflight`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sheetUrl })
+        });
+        body = await res.json();
+      } catch (e) {
+        setOverall(`Network error: ${e.message}`, 'err');
+        preflightBtn.disabled = false;
+        return;
+      }
+
+      if (!res.ok) {
+        setOverall(`${body.error || 'PREFLIGHT_FAILED'}: ${body.message || ''}`, 'err');
+        preflightBtn.disabled = false;
+        return;
+      }
+
+      preflight = body;
+      renderPreflightSummary(body);
+      renderRows(body.rows);
+      setOverall(`Sheet validated. ${body.rows.length} row(s) ready.`, 'ok');
+      preflightBtn.disabled = false;
+      runBtn.disabled = body.rows.length === 0;
+    }
+
+    async function processRow(row) {
+      updateRowStatus(row.rowIndex, 'running');
+      try {
+        const res = await fetch(`${API_BASE}/api/sheets/process-row`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            spreadsheetId: preflight.spreadsheetId,
+            rowIndex:      row.rowIndex,
+            pageUrl:       row.pageUrl,
+            headerIndex:   preflight.headerIndex
+          })
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          updateRowStatus(row.rowIndex, 'err', {
+            platform: body.platform,
+            error:    body.error || `HTTP_${res.status}`,
+            message:  body.message || ''
+          });
+          return { ok: false };
+        }
+        updateRowStatus(row.rowIndex, body.ok ? 'ok' : 'err', {
+          platform: body.platform,
+          error:    body.error,
+          message:  body.message
+        });
+        return { ok: !!body.ok };
+      } catch (e) {
+        updateRowStatus(row.rowIndex, 'err', { error: 'NETWORK_ERROR', message: e.message });
+        return { ok: false };
+      }
+    }
+
+    async function processAllRows() {
+      if (!preflight || preflight.rows.length === 0) return;
+      runBtn.disabled = true;
+      preflightBtn.disabled = true;
+
+      const queue = preflight.rows.slice();
+      const total = queue.length;
+      let done = 0, ok = 0, failed = 0;
+      let idx = 0;
+
+      setOverall(`Processed 0 / ${total} (0 ok, 0 failed)`, 'muted');
+
+      async function worker() {
+        while (idx < queue.length) {
+          const cur = idx++;
+          const row = queue[cur];
+          const result = await processRow(row);
+          done += 1;
+          if (result.ok) ok += 1; else failed += 1;
+          setOverall(`Processed ${done} / ${total} (${ok} ok, ${failed} failed)`,
+                     failed > 0 && done === total ? 'err' : (done === total ? 'ok' : 'muted'));
+        }
+      }
+
+      const workers = Array.from({ length: Math.min(CONCURRENCY, total) }, () => worker());
+      await Promise.all(workers);
+
+      setOverall(`Done. ${ok} ok, ${failed} failed (of ${total}).`,
+                 failed > 0 ? 'err' : 'ok');
+      runBtn.disabled = false;
+      preflightBtn.disabled = false;
+    }
+
+    preflightBtn.addEventListener('click', preflightSheet);
+    runBtn.addEventListener('click', processAllRows);
+    sheetInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') preflightSheet(); });
+  </script>
+</body>
+</html>
