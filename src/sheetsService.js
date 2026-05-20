@@ -19,12 +19,14 @@ const PAGE_URL_HEADER = 'page_url';
 // rows whose URL could not be resolved are skipped entirely so existing
 // cell content is never clobbered.
 const COLUMN_MAP = [
-  ['Title',          'title'],
-  ['content_url',    'heroImageUrl'],
-  ['likeness_match', 'channelHandle'],
-  ['likeness_label', 'durationIso'],
-  ['likeness_score', 'viewCount'],
-  ['recommendation', 'publishedAt']
+  ['Title',           'title'],
+  ['content_url',     'heroImageUrl'],
+  ['likeness_match',  'channelHandle'],
+  ['likeness_label',  'durationIso'],
+  ['likeness_score',  'viewCount'],
+  ['recommendation',  'publishedAt'],
+  ['durationSeconds', 'durationSeconds'],
+  ['viewCount',       'viewCount']
 ];
 
 /**

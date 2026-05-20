@@ -2214,7 +2214,7 @@ const indexData = {
   message: 'Social Media Metadata API Server',
   uiTools: [
     { path: '/csv.html',                name: 'CSV Generator',       desc: 'Batch process URLs and download CSV' },
-    { path: '/sheets.html',             name: 'Sheets Processor',    desc: 'Process URLs from a Google Sheet `report` tab and write metadata back' },
+    { path: '/sheets.html',             name: 'Vermillio Report Augmentation', desc: 'Process URLs from a Google Sheet `report` tab and write metadata back' },
     { path: '/channels.html',           name: 'Channel Search',      desc: 'YouTube channel search CSV export' },
     { path: '/screenshot.html',         name: 'Screenshot Tool',     desc: 'Take screenshots and get public URLs or download CSV' },
     { path: '/discover-siblings.html',  name: 'Sibling Discovery',   desc: 'Upload SERP CSV to find related videos on the same channel' }

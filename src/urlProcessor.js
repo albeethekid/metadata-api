@@ -261,8 +261,8 @@ async function processUrl(rawUrl, opts = {}) {
       ok: false,
       platform: null,
       normalized: emptyNormalized(),
-      error: 'INVALID_URL',
-      message: `Could not parse URL: ${rawUrl}`
+      error: 'UNSUPPORTED_URL',
+      message: `Unsupported URL (no supported platform matched): ${rawUrl}`
     };
   }
 

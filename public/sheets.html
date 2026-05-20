@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Google Sheets Processor</title>
+  <title>Vermillio Report Augmentation</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; max-width: 980px; }
     h1 { margin-bottom: 8px; }
@@ -32,7 +32,7 @@
   </style>
 </head>
 <body>
-  <h1>Google Sheets Processor</h1>
+  <h1>Vermillio Report Augmentation</h1>
   <p class="muted">
     Process a Google Sheet's <code>report</code> tab. Reads URLs from the
     <code>page_url</code> column and writes normalized metadata back into the same row.
@@ -47,12 +47,14 @@
       <code id="svc-email">vermillioserviceaccount@vermillio.iam.gserviceaccount.com</code>
     </p>
     <p>The <code>report</code> tab is read from / written to. Columns are matched by header name, never by position. These headers are written when present:</p>
-    <pre class="help">Title          ← title (normalized)
-content_url    ← heroImageUrl
-likeness_match ← channelHandle (blank if N/A)
-likeness_label ← durationIso   (blank if N/A)
-likeness_score ← viewCount
-recommendation ← publishedAt</pre>
+    <pre class="help">Title            ← title (normalized)
+content_url      ← heroImageUrl
+likeness_match   ← channelHandle (blank if N/A)
+likeness_label   ← durationIso   (blank if N/A)
+likeness_score   ← viewCount
+recommendation   ← publishedAt
+durationSeconds  ← durationSeconds
+viewCount        ← viewCount</pre>
     <p class="muted">Missing columns in your Sheet are skipped silently. Only <code>page_url</code> is required. Rows whose URL can't be processed are <strong>skipped entirely</strong> — nothing is written and existing cell content is preserved.</p>
   </details>
 
@@ -128,7 +130,7 @@ recommendation ← publishedAt</pre>
     }
 
     function renderPreflightSummary(pf) {
-      const knownHeaders = ['Title','content_url','likeness_match','likeness_label','likeness_score','recommendation'];
+      const knownHeaders = ['Title','content_url','likeness_match','likeness_label','likeness_score','recommendation','durationSeconds','viewCount'];
       const present = knownHeaders.filter(h => h in pf.headerIndex);
       const missing = knownHeaders.filter(h => !(h in pf.headerIndex));
       const tasks = buildUniqueTasks(pf.rows);
