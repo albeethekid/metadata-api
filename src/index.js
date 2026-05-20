@@ -5,7 +5,7 @@ const { getTranscript, TranscriptError, getDiagnostics } = require('./youtubeTra
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
 const { scrapeInstagramPost } = require('./instagramScraper');
-const { extractSpreadsheetId, readReportTab, writeRowMappedValues } = require('./sheetsService');
+const { extractSpreadsheetId, readReportTab, writeRowMappedValues, writeRowsBatch } = require('./sheetsService');
 const { processUrl } = require('./urlProcessor');
 const express = require('express');
 const app = express();
@@ -552,13 +552,66 @@ app.post('/api/sheets/preflight', async (req, res) => {
   }
 });
 
-// POST { spreadsheetId, rowIndex, pageUrl, headerIndex }
+// POST { pageUrl, rowIndex?, includeScreenshots? }
+//   → { ok, rowIndex, platform, normalized, error?, message? }
+// Fetch ONLY: runs the URL through the same CSV-Generator endpoints, returns
+// the normalized object. No Sheet I/O. Lets the UI parallelize fetches and
+// then flush writes in chunks via /api/sheets/write-rows (1 quota unit per
+// chunk instead of per row).
+//
+// Always 200 — per-row failures arrive as `ok: false` with `error`/`message`
+// so a batch can keep going.
+app.post('/api/sheets/fetch-row', async (req, res) => {
+  const { pageUrl, rowIndex, includeScreenshots } = req.body || {};
+  if (!pageUrl) {
+    return res.status(400).json({ error: 'MISSING_FIELDS', message: 'pageUrl is required.' });
+  }
+  const result = await processUrl(pageUrl, {
+    includeScreenshots: includeScreenshots !== false  // default true
+  });
+  return res.json({
+    ok: result.ok,
+    rowIndex: rowIndex || null,
+    platform: result.platform,
+    normalized: result.normalized,
+    error: result.ok ? null : result.error,
+    message: result.ok ? null : result.message
+  });
+});
+
+// POST { spreadsheetId, headerIndex, rows: [{ rowIndex, normalized, errorDetail }] }
+//   → { updated, rows }
+// Writes many rows back to the Sheet in ONE Sheets API call (values.batchUpdate).
+// Use this after collecting N results client-side via /api/sheets/fetch-row.
+app.post('/api/sheets/write-rows', async (req, res) => {
+  const { spreadsheetId, headerIndex, rows } = req.body || {};
+  if (!spreadsheetId || !headerIndex || !Array.isArray(rows)) {
+    return res.status(400).json({
+      error: 'MISSING_FIELDS',
+      message: 'spreadsheetId, headerIndex and rows[] are required.'
+    });
+  }
+  if (rows.length === 0) {
+    return res.json({ updated: 0, rows: 0 });
+  }
+  try {
+    const result = await writeRowsBatch(spreadsheetId, headerIndex, rows);
+    return res.json(result);
+  } catch (e) {
+    return res.status(e.status || 500).json({
+      error: e.code || 'WRITE_FAILED',
+      message: e.message
+    });
+  }
+});
+
+// POST { spreadsheetId, rowIndex, pageUrl, headerIndex, includeScreenshots? }
 //   → { ok, rowIndex, platform, error?, message? }
-// Always returns 200 with `ok: false` on per-row failures (so the UI can
-// keep going across the batch). 4xx/5xx are reserved for protocol-level
-// problems (bad request, sheet write failed entirely).
+// Legacy single-shot path: fetch + write in one call. Kept for ad-hoc /
+// scripted use. The Sheets Processor UI now uses fetch-row + write-rows
+// to batch writes.
 app.post('/api/sheets/process-row', async (req, res) => {
-  const { spreadsheetId, rowIndex, pageUrl, headerIndex } = req.body || {};
+  const { spreadsheetId, rowIndex, pageUrl, headerIndex, includeScreenshots } = req.body || {};
   if (!spreadsheetId || !rowIndex || !pageUrl || !headerIndex) {
     return res.status(400).json({
       error: 'MISSING_FIELDS',
@@ -566,7 +619,9 @@ app.post('/api/sheets/process-row', async (req, res) => {
     });
   }
 
-  const result = await processUrl(pageUrl);
+  const result = await processUrl(pageUrl, {
+    includeScreenshots: includeScreenshots !== false
+  });
   const errorDetail = result.ok ? null : `${result.error}: ${result.message}`;
 
   try {

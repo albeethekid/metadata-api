@@ -23,6 +23,7 @@
     .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
     .pill.pending  { background: #f0f0f0; color: #555; }
     .pill.running  { background: #fff7d6; color: #8a6d00; }
+    .pill.fetched  { background: #e0f2fe; color: #075985; }
     .pill.ok       { background: #dcfce7; color: #166534; }
     .pill.err      { background: #fde2e2; color: #b42318; }
     .url-cell { max-width: 440px; word-break: break-all; font-family: monospace; font-size: 12px; }
@@ -62,10 +63,18 @@ stacktrace     ← failure detail (blank on success)</pre>
     <input type="text" id="sheet-url" placeholder="https://docs.google.com/spreadsheets/d/<id>/edit#gid=0" />
   </div>
   <div class="row">
+    <label>
+      <input type="checkbox" id="include-screenshots" />
+      <strong>Include screenshots for unsupported URLs</strong>
+      <span class="muted">(off by default — same toggle as CSV Generator)</span>
+    </label>
+  </div>
+  <div class="row">
     <button id="preflight-btn">Validate Sheet</button>
     <button id="run-btn" disabled>Process Rows</button>
     <span id="overall-status" class="status muted"></span>
   </div>
+  <div id="write-status" class="status muted" style="display:none;"></div>
 
   <div id="preflight-summary" class="panel" style="display: none;"></div>
 
@@ -84,21 +93,29 @@ stacktrace     ← failure detail (blank on success)</pre>
 
   <script>
     const API_BASE = '';
-    const CONCURRENCY = 5;
+    const FETCH_CONCURRENCY  = 5;   // parallel URL fetches
+    const WRITE_BATCH_SIZE   = 25;  // rows per Sheets API call
 
-    const sheetInput      = document.getElementById('sheet-url');
-    const preflightBtn    = document.getElementById('preflight-btn');
-    const runBtn          = document.getElementById('run-btn');
-    const overallStatus   = document.getElementById('overall-status');
-    const preflightSummary = document.getElementById('preflight-summary');
-    const rowsTable       = document.getElementById('rows-table');
-    const rowsTbody       = rowsTable.querySelector('tbody');
+    const sheetInput          = document.getElementById('sheet-url');
+    const screenshotsCheckbox = document.getElementById('include-screenshots');
+    const preflightBtn        = document.getElementById('preflight-btn');
+    const runBtn              = document.getElementById('run-btn');
+    const overallStatus       = document.getElementById('overall-status');
+    const writeStatus         = document.getElementById('write-status');
+    const preflightSummary    = document.getElementById('preflight-summary');
+    const rowsTable           = document.getElementById('rows-table');
+    const rowsTbody           = rowsTable.querySelector('tbody');
 
     let preflight = null; // { spreadsheetId, headers, headerIndex, rows }
 
     function setOverall(text, cls) {
       overallStatus.textContent = text;
       overallStatus.className = 'status ' + (cls || 'muted');
+    }
+    function setWriteStatus(text, cls) {
+      writeStatus.style.display = text ? 'block' : 'none';
+      writeStatus.textContent = text || '';
+      writeStatus.className = 'status ' + (cls || 'muted');
     }
 
     function renderPreflightSummary(pf) {
@@ -138,10 +155,10 @@ stacktrace     ← failure detail (blank on success)</pre>
       const pill = tr.children[0].querySelector('.pill');
       pill.className = 'pill ' + status;
       pill.textContent = status;
-      tr.children[3].textContent = platform || '';
+      if (platform != null) tr.children[3].textContent = platform || '';
       if (status === 'err') {
         tr.children[4].textContent = `${error || ''}: ${message || ''}`.replace(/^:\s*/, '');
-      } else if (status === 'ok') {
+      } else if (status === 'ok' || status === 'fetched') {
         tr.children[4].textContent = '';
       }
     }
@@ -153,6 +170,7 @@ stacktrace     ← failure detail (blank on success)</pre>
       preflightBtn.disabled = true;
       runBtn.disabled = true;
       setOverall('Validating…', 'muted');
+      setWriteStatus('');
       preflightSummary.style.display = 'none';
       rowsTable.style.display = 'none';
       rowsTbody.innerHTML = '';
@@ -185,37 +203,92 @@ stacktrace     ← failure detail (blank on success)</pre>
       runBtn.disabled = body.rows.length === 0;
     }
 
-    async function processRow(row) {
+    // Fetch ONLY — returns the normalized payload, no Sheet write.
+    async function fetchRow(row, includeScreenshots) {
       updateRowStatus(row.rowIndex, 'running');
       try {
-        const res = await fetch(`${API_BASE}/api/sheets/process-row`, {
+        const res = await fetch(`${API_BASE}/api/sheets/fetch-row`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            spreadsheetId: preflight.spreadsheetId,
-            rowIndex:      row.rowIndex,
-            pageUrl:       row.pageUrl,
-            headerIndex:   preflight.headerIndex
+            pageUrl:  row.pageUrl,
+            rowIndex: row.rowIndex,
+            includeScreenshots
           })
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
           updateRowStatus(row.rowIndex, 'err', {
-            platform: body.platform,
-            error:    body.error || `HTTP_${res.status}`,
-            message:  body.message || ''
+            error:   body.error || `HTTP_${res.status}`,
+            message: body.message || ''
           });
-          return { ok: false };
+          return {
+            rowIndex:    row.rowIndex,
+            normalized:  null,
+            errorDetail: `${body.error || `HTTP_${res.status}`}: ${body.message || ''}`,
+            ok:          false
+          };
         }
-        updateRowStatus(row.rowIndex, body.ok ? 'ok' : 'err', {
+        updateRowStatus(row.rowIndex, body.ok ? 'fetched' : 'err', {
           platform: body.platform,
           error:    body.error,
           message:  body.message
         });
-        return { ok: !!body.ok };
+        return {
+          rowIndex:    row.rowIndex,
+          normalized:  body.normalized || null,
+          errorDetail: body.ok ? null : `${body.error || 'UNKNOWN'}: ${body.message || ''}`,
+          ok:          !!body.ok
+        };
       } catch (e) {
         updateRowStatus(row.rowIndex, 'err', { error: 'NETWORK_ERROR', message: e.message });
-        return { ok: false };
+        return {
+          rowIndex:    row.rowIndex,
+          normalized:  null,
+          errorDetail: `NETWORK_ERROR: ${e.message}`,
+          ok:          false
+        };
+      }
+    }
+
+    // Send one Sheets API call for a chunk of completed rows.
+    async function flushWriteChunk(chunk) {
+      try {
+        const res = await fetch(`${API_BASE}/api/sheets/write-rows`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            spreadsheetId: preflight.spreadsheetId,
+            headerIndex:   preflight.headerIndex,
+            rows:          chunk
+          })
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          // Mark all rows in chunk as write-failed so the user can see
+          for (const r of chunk) {
+            updateRowStatus(r.rowIndex, 'err', {
+              error:   body.error || `HTTP_${res.status}`,
+              message: body.message || 'Sheet write failed'
+            });
+          }
+          return { ok: false, error: body.error || `HTTP_${res.status}`, message: body.message || '' };
+        }
+        // Flip each row from `fetched`→`ok` (unless it was already err)
+        for (const r of chunk) {
+          const tr = rowsTbody.querySelector(`tr[data-row-index="${r.rowIndex}"]`);
+          const pill = tr && tr.children[0].querySelector('.pill');
+          if (pill && pill.classList.contains('fetched')) {
+            pill.className = 'pill ok';
+            pill.textContent = 'ok';
+          }
+        }
+        return { ok: true, updated: body.updated || 0 };
+      } catch (e) {
+        for (const r of chunk) {
+          updateRowStatus(r.rowIndex, 'err', { error: 'NETWORK_ERROR', message: e.message });
+        }
+        return { ok: false, error: 'NETWORK_ERROR', message: e.message };
       }
     }
 
@@ -223,31 +296,84 @@ stacktrace     ← failure detail (blank on success)</pre>
       if (!preflight || preflight.rows.length === 0) return;
       runBtn.disabled = true;
       preflightBtn.disabled = true;
+      setWriteStatus('');
 
+      const includeScreenshots = screenshotsCheckbox.checked;
       const queue = preflight.rows.slice();
       const total = queue.length;
-      let done = 0, ok = 0, failed = 0;
       let idx = 0;
+      let fetchedCount = 0, okCount = 0, failedCount = 0;
+      let writeBuffer = [];
+      let writesDone = 0, writeRowsDone = 0, writeApiCalls = 0;
+      let writeError = null;
 
-      setOverall(`Processed 0 / ${total} (0 ok, 0 failed)`, 'muted');
+      function updateOverall() {
+        const cls = (fetchedCount === total)
+          ? (failedCount > 0 ? 'err' : 'ok')
+          : 'muted';
+        setOverall(
+          `Fetched ${fetchedCount} / ${total} (${okCount} ok, ${failedCount} failed)`, cls);
+      }
+      function updateWrite() {
+        const cls = writeError ? 'err' : (writeRowsDone === total ? 'ok' : 'muted');
+        setWriteStatus(
+          `Wrote ${writeRowsDone} / ${total} rows back to Sheet (${writeApiCalls} Sheets API call${writeApiCalls === 1 ? '' : 's'})` +
+          (writeError ? ` — last error: ${writeError}` : ''), cls);
+      }
+
+      updateOverall();
+      updateWrite();
+
+      // Serialize writes (only one Sheets write in flight at a time) but
+      // let fetches keep streaming in.
+      let writeChainTail = Promise.resolve();
+      function scheduleFlush(chunk) {
+        writeChainTail = writeChainTail.then(async () => {
+          const result = await flushWriteChunk(chunk);
+          writeApiCalls += 1;
+          if (result.ok) {
+            writeRowsDone += chunk.length;
+          } else {
+            writeError = `${result.error}: ${result.message}`;
+            writeRowsDone += chunk.length; // count them as accounted-for
+          }
+          updateWrite();
+        });
+        return writeChainTail;
+      }
 
       async function worker() {
         while (idx < queue.length) {
           const cur = idx++;
           const row = queue[cur];
-          const result = await processRow(row);
-          done += 1;
-          if (result.ok) ok += 1; else failed += 1;
-          setOverall(`Processed ${done} / ${total} (${ok} ok, ${failed} failed)`,
-                     failed > 0 && done === total ? 'err' : (done === total ? 'ok' : 'muted'));
+          const out = await fetchRow(row, includeScreenshots);
+          fetchedCount += 1;
+          if (out.ok) okCount += 1; else failedCount += 1;
+          writeBuffer.push({
+            rowIndex:    out.rowIndex,
+            normalized:  out.normalized,
+            errorDetail: out.errorDetail
+          });
+          updateOverall();
+          if (writeBuffer.length >= WRITE_BATCH_SIZE) {
+            const chunk = writeBuffer.splice(0, writeBuffer.length);
+            scheduleFlush(chunk);
+          }
         }
       }
 
-      const workers = Array.from({ length: Math.min(CONCURRENCY, total) }, () => worker());
+      const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, total) }, () => worker());
       await Promise.all(workers);
 
-      setOverall(`Done. ${ok} ok, ${failed} failed (of ${total}).`,
-                 failed > 0 ? 'err' : 'ok');
+      // Flush any remaining buffered rows
+      if (writeBuffer.length > 0) {
+        const chunk = writeBuffer.splice(0, writeBuffer.length);
+        scheduleFlush(chunk);
+      }
+      await writeChainTail;
+
+      const finalCls = (failedCount > 0 || writeError) ? 'err' : 'ok';
+      setOverall(`Done. ${okCount} ok, ${failedCount} failed (of ${total}).`, finalCls);
       runBtn.disabled = false;
       preflightBtn.disabled = false;
     }

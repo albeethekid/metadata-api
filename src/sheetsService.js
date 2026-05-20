@@ -226,6 +226,39 @@ async function writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, normal
   return { updated: data.length };
 }
 
+/**
+ * Write many rows in a single Sheets API call. Each entry in `rowOutputs`
+ * produces its own set of per-cell updates; they are merged into one
+ * `values.batchUpdate` request, which is dramatically cheaper than calling
+ * writeRowMappedValues per row (1 quota unit instead of N).
+ *
+ * @param {string} spreadsheetId
+ * @param {Object<string,number>} headerIndex
+ * @param {Array<{rowIndex:number, normalized:?Object, errorDetail:?string}>} rowOutputs
+ * @returns {Promise<{updated:number, rows:number}>}
+ */
+async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs) {
+  if (!Array.isArray(rowOutputs) || rowOutputs.length === 0) {
+    return { updated: 0, rows: 0 };
+  }
+  const data = [];
+  for (const r of rowOutputs) {
+    const updates = buildRowUpdates(r.rowIndex, headerIndex, r.normalized, r.errorDetail);
+    for (const u of updates) data.push(u);
+  }
+  if (data.length === 0) return { updated: 0, rows: rowOutputs.length };
+  const sheets = await getSheetsClient();
+  try {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: { valueInputOption: 'RAW', data }
+    });
+  } catch (e) {
+    throw wrapApiError(e, 502);
+  }
+  return { updated: data.length, rows: rowOutputs.length };
+}
+
 module.exports = {
   TAB_NAME,
   PAGE_URL_HEADER,
@@ -233,5 +266,6 @@ module.exports = {
   COLUMN_MAP,
   extractSpreadsheetId,
   readReportTab,
-  writeRowMappedValues
+  writeRowMappedValues,
+  writeRowsBatch
 };
