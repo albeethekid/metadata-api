@@ -579,7 +579,7 @@ app.post('/api/sheets/fetch-row', async (req, res) => {
   });
 });
 
-// POST { spreadsheetId, headerIndex, rows: [{ rowIndex, normalized, errorDetail }] }
+// POST { spreadsheetId, headerIndex, rows: [{ rowIndex, normalized }] }
 //   → { updated, rows }
 // Writes many rows back to the Sheet in ONE Sheets API call (values.batchUpdate).
 // Use this after collecting N results client-side via /api/sheets/fetch-row.
@@ -622,10 +622,12 @@ app.post('/api/sheets/process-row', async (req, res) => {
   const result = await processUrl(pageUrl, {
     includeScreenshots: includeScreenshots !== false
   });
-  const errorDetail = result.ok ? null : `${result.error}: ${result.message}`;
 
+  // Failures are no-ops on the Sheet — leave the existing row untouched.
   try {
-    await writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, result.normalized, errorDetail);
+    if (result.ok) {
+      await writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, result.normalized);
+    }
   } catch (e) {
     return res.status(e.status || 500).json({
       ok: false,

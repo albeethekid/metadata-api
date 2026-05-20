@@ -52,10 +52,8 @@ content_url    ← heroImageUrl
 likeness_match ← channelHandle (blank if N/A)
 likeness_label ← durationIso   (blank if N/A)
 likeness_score ← viewCount
-recommendation ← publishedAt
-error          ← likeCount
-stacktrace     ← failure detail (blank on success)</pre>
-    <p class="muted">Missing columns in your Sheet are skipped silently. Only <code>page_url</code> is required.</p>
+recommendation ← publishedAt</pre>
+    <p class="muted">Missing columns in your Sheet are skipped silently. Only <code>page_url</code> is required. Rows whose URL can't be processed are <strong>skipped entirely</strong> — nothing is written and existing cell content is preserved.</p>
   </details>
 
   <div class="row">
@@ -119,7 +117,7 @@ stacktrace     ← failure detail (blank on success)</pre>
     }
 
     function renderPreflightSummary(pf) {
-      const knownHeaders = ['Title','content_url','likeness_match','likeness_label','likeness_score','recommendation','error','stacktrace'];
+      const knownHeaders = ['Title','content_url','likeness_match','likeness_label','likeness_score','recommendation'];
       const present = knownHeaders.filter(h => h in pf.headerIndex);
       const missing = knownHeaders.filter(h => !(h in pf.headerIndex));
       preflightSummary.style.display = 'block';
@@ -315,9 +313,15 @@ stacktrace     ← failure detail (blank on success)</pre>
           `Fetched ${fetchedCount} / ${total} (${okCount} ok, ${failedCount} failed)`, cls);
       }
       function updateWrite() {
-        const cls = writeError ? 'err' : (writeRowsDone === total ? 'ok' : 'muted');
+        // We only write successful rows back, so the denominator is okCount
+        // (which grows as fetches complete). Skipped failures are excluded.
+        const expectedWrites = okCount;
+        const cls = writeError
+          ? 'err'
+          : (fetchedCount === total && writeRowsDone === expectedWrites ? 'ok' : 'muted');
         setWriteStatus(
-          `Wrote ${writeRowsDone} / ${total} rows back to Sheet (${writeApiCalls} Sheets API call${writeApiCalls === 1 ? '' : 's'})` +
+          `Wrote ${writeRowsDone} of ${expectedWrites} successful row${expectedWrites === 1 ? '' : 's'} back to Sheet ` +
+          `(${writeApiCalls} Sheets API call${writeApiCalls === 1 ? '' : 's'}${failedCount ? `; ${failedCount} skipped` : ''})` +
           (writeError ? ` — last error: ${writeError}` : ''), cls);
       }
 
@@ -349,11 +353,14 @@ stacktrace     ← failure detail (blank on success)</pre>
           const out = await fetchRow(row, includeScreenshots);
           fetchedCount += 1;
           if (out.ok) okCount += 1; else failedCount += 1;
-          writeBuffer.push({
-            rowIndex:    out.rowIndex,
-            normalized:  out.normalized,
-            errorDetail: out.errorDetail
-          });
+          // Failed rows are skipped: don't write anything to the Sheet,
+          // leaving existing cell content untouched.
+          if (out.ok) {
+            writeBuffer.push({
+              rowIndex:   out.rowIndex,
+              normalized: out.normalized
+            });
+          }
           updateOverall();
           if (writeBuffer.length >= WRITE_BATCH_SIZE) {
             const chunk = writeBuffer.splice(0, writeBuffer.length);

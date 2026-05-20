@@ -13,19 +13,18 @@ const { google } = require('googleapis');
 
 const TAB_NAME = 'report';
 const PAGE_URL_HEADER = 'page_url';
-const STACKTRACE_HEADER = 'stacktrace';
 
 // Mapping from spreadsheet header → key on the normalized response from
-// urlProcessor.normalizeResponse(). `stacktrace` is handled separately
-// because it should only be populated when something useful exists.
+// urlProcessor.normalizeResponse(). Failures are NOT written to the sheet:
+// rows whose URL could not be resolved are skipped entirely so existing
+// cell content is never clobbered.
 const COLUMN_MAP = [
   ['Title',          'title'],
   ['content_url',    'heroImageUrl'],
   ['likeness_match', 'channelHandle'],
   ['likeness_label', 'durationIso'],
   ['likeness_score', 'viewCount'],
-  ['recommendation', 'publishedAt'],
-  ['error',          'likeCount']
+  ['recommendation', 'publishedAt']
 ];
 
 /**
@@ -181,38 +180,35 @@ async function readReportTab(spreadsheetId) {
 }
 
 /**
- * Build the per-cell update payload for one row, honoring COLUMN_MAP and
- * the special `stacktrace` column. Columns missing from the Sheet are
- * silently skipped — this lets users keep partial schemas.
+ * Build the per-cell update payload for one row, honoring COLUMN_MAP.
+ * Columns missing from the Sheet are silently skipped — this lets users
+ * keep partial schemas. Rows with no normalized payload (i.e. the URL
+ * could not be processed) produce zero updates so the existing row is
+ * left untouched.
  */
-function buildRowUpdates(rowIndex, headerIndex, normalized, errorDetail) {
+function buildRowUpdates(rowIndex, headerIndex, normalized) {
+  if (!normalized) return [];
   const data = [];
-  const push = (sheetCol, value) => {
-    if (!(sheetCol in headerIndex)) return;
-    const a1 = `${TAB_NAME}!${colLetter(headerIndex[sheetCol])}${rowIndex}`;
-    const cellValue = (value === '' || value == null) ? '' : String(value);
-    data.push({ range: a1, values: [[cellValue]] });
-  };
-
   for (const [sheetCol, normKey] of COLUMN_MAP) {
-    push(sheetCol, normalized ? normalized[normKey] : '');
+    if (!(sheetCol in headerIndex)) continue;
+    const v = normalized[normKey];
+    const a1 = `${TAB_NAME}!${colLetter(headerIndex[sheetCol])}${rowIndex}`;
+    const cellValue = (v === '' || v == null) ? '' : String(v);
+    data.push({ range: a1, values: [[cellValue]] });
   }
-  // stacktrace: only populated when we actually have useful debug detail
-  push(STACKTRACE_HEADER, errorDetail ? String(errorDetail).slice(0, 500) : '');
-
   return data;
 }
 
 /**
- * Write the mapped values back to the given row.
+ * Write the mapped values back to the given row. Failures (no normalized)
+ * are no-ops — the row is left untouched.
  * @param {string} spreadsheetId
  * @param {number} rowIndex            1-based row in the `report` tab
  * @param {Object<string,number>} headerIndex
- * @param {?Object} normalized         result of urlProcessor.normalizeResponse, or null on failure
- * @param {?string} errorDetail        when set, written to `stacktrace`
+ * @param {?Object} normalized         result of urlProcessor.normalizeResponse
  */
-async function writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, normalized, errorDetail = null) {
-  const data = buildRowUpdates(rowIndex, headerIndex, normalized, errorDetail);
+async function writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, normalized) {
+  const data = buildRowUpdates(rowIndex, headerIndex, normalized);
   if (data.length === 0) return { updated: 0 };
   const sheets = await getSheetsClient();
   try {
@@ -232,9 +228,13 @@ async function writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, normal
  * `values.batchUpdate` request, which is dramatically cheaper than calling
  * writeRowMappedValues per row (1 quota unit instead of N).
  *
+ * Rows whose `normalized` is null are skipped silently (their cells are
+ * left untouched on the Sheet), so failed/unsupported URLs don't clobber
+ * existing data.
+ *
  * @param {string} spreadsheetId
  * @param {Object<string,number>} headerIndex
- * @param {Array<{rowIndex:number, normalized:?Object, errorDetail:?string}>} rowOutputs
+ * @param {Array<{rowIndex:number, normalized:?Object}>} rowOutputs
  * @returns {Promise<{updated:number, rows:number}>}
  */
 async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs) {
@@ -243,7 +243,7 @@ async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs) {
   }
   const data = [];
   for (const r of rowOutputs) {
-    const updates = buildRowUpdates(r.rowIndex, headerIndex, r.normalized, r.errorDetail);
+    const updates = buildRowUpdates(r.rowIndex, headerIndex, r.normalized);
     for (const u of updates) data.push(u);
   }
   if (data.length === 0) return { updated: 0, rows: rowOutputs.length };
@@ -262,7 +262,6 @@ async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs) {
 module.exports = {
   TAB_NAME,
   PAGE_URL_HEADER,
-  STACKTRACE_HEADER,
   COLUMN_MAP,
   extractSpreadsheetId,
   readReportTab,
