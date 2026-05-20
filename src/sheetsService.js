@@ -18,15 +18,22 @@ const PAGE_URL_HEADER = 'page_url';
 // urlProcessor.normalizeResponse(). Failures are NOT written to the sheet:
 // rows whose URL could not be resolved are skipped entirely so existing
 // cell content is never clobbered.
+// Header-name based mapping (column letter is wherever that header sits).
 const COLUMN_MAP = [
-  ['Title',           'title'],
-  ['content_url',     'heroImageUrl'],
-  ['likeness_match',  'channelHandle'],
-  ['likeness_label',  'durationIso'],
-  ['likeness_score',  'viewCount'],
-  ['recommendation',  'publishedAt'],
-  ['durationSeconds', 'durationSeconds'],
-  ['viewCount',       'viewCount']
+  ['Title',          'title'],
+  ['content_url',    'heroImageUrl'],
+  ['likeness_match', 'channelHandle'],
+  ['likeness_label', 'durationIso'],
+  ['likeness_score', 'viewCount'],
+  ['recommendation', 'publishedAt']
+];
+
+// Fixed column-letter mapping. These cells are written by spreadsheet
+// column position (regardless of the header name in row 1), matching
+// the Vermillio Report layout where R/S are reserved for these fields.
+const COLUMN_LETTER_MAP = [
+  ['R', 'durationSeconds'],
+  ['S', 'viewCount']
 ];
 
 /**
@@ -182,20 +189,36 @@ async function readReportTab(spreadsheetId) {
 }
 
 /**
- * Build the per-cell update payload for one row, honoring COLUMN_MAP.
- * Columns missing from the Sheet are silently skipped — this lets users
- * keep partial schemas. Rows with no normalized payload (i.e. the URL
- * could not be processed) produce zero updates so the existing row is
- * left untouched.
+ * Build the per-cell update payload for one row.
+ *
+ * Two mapping sources, both applied:
+ *   1. COLUMN_MAP        — header-name based; columns missing from the Sheet
+ *                          are silently skipped (partial-schema friendly).
+ *   2. COLUMN_LETTER_MAP — fixed spreadsheet column letters (e.g. R, S);
+ *                          written regardless of header name in row 1.
+ *
+ * Cells are de-duped by A1 range so if the two maps ever target the same
+ * cell, the letter-based value wins (last write).
+ *
+ * Rows with no normalized payload produce zero updates — the existing row
+ * is left untouched.
  */
 function buildRowUpdates(rowIndex, headerIndex, normalized) {
   if (!normalized) return [];
-  const data = [];
+  const byCell = new Map(); // a1 -> value
   for (const [sheetCol, normKey] of COLUMN_MAP) {
     if (!(sheetCol in headerIndex)) continue;
-    const v = normalized[normKey];
     const a1 = `${TAB_NAME}!${colLetter(headerIndex[sheetCol])}${rowIndex}`;
-    const cellValue = (v === '' || v == null) ? '' : String(v);
+    const v = normalized[normKey];
+    byCell.set(a1, (v === '' || v == null) ? '' : String(v));
+  }
+  for (const [letter, normKey] of COLUMN_LETTER_MAP) {
+    const a1 = `${TAB_NAME}!${letter}${rowIndex}`;
+    const v = normalized[normKey];
+    byCell.set(a1, (v === '' || v == null) ? '' : String(v));
+  }
+  const data = [];
+  for (const [a1, cellValue] of byCell) {
     data.push({ range: a1, values: [[cellValue]] });
   }
   return data;
@@ -265,6 +288,7 @@ module.exports = {
   TAB_NAME,
   PAGE_URL_HEADER,
   COLUMN_MAP,
+  COLUMN_LETTER_MAP,
   extractSpreadsheetId,
   readReportTab,
   writeRowMappedValues,
