@@ -306,6 +306,54 @@ async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs) {
   return { updated: data.length, rows: rowOutputs.length };
 }
 
+/**
+ * Generic per-cell writer. `edits` is an array of { rowIndex, header, value }.
+ * Edits whose header is missing from `headerIndex` (or otherwise malformed)
+ * are reported back via `skipped` instead of failing the whole batch.
+ *
+ * @returns {Promise<{ updated:number, skipped:Array<{edit:object, reason:string}> }>}
+ */
+async function writeCellsByHeader(spreadsheetId, headerIndex, edits) {
+  if (!Array.isArray(edits) || edits.length === 0) {
+    return { updated: 0, skipped: [] };
+  }
+  const data = [];
+  const skipped = [];
+  for (const e of edits) {
+    if (!e || typeof e !== 'object') {
+      skipped.push({ edit: e, reason: 'INVALID_EDIT' });
+      continue;
+    }
+    const rowIndex = Number(e.rowIndex);
+    if (!Number.isInteger(rowIndex) || rowIndex < 2) {
+      skipped.push({ edit: e, reason: 'INVALID_ROW_INDEX' });
+      continue;
+    }
+    if (!e.header || typeof e.header !== 'string') {
+      skipped.push({ edit: e, reason: 'INVALID_HEADER' });
+      continue;
+    }
+    if (!(e.header in headerIndex)) {
+      skipped.push({ edit: e, reason: 'HEADER_NOT_FOUND' });
+      continue;
+    }
+    const a1 = `${TAB_NAME}!${colLetter(headerIndex[e.header])}${rowIndex}`;
+    const v = (e.value === '' || e.value == null) ? '' : String(e.value);
+    data.push({ range: a1, values: [[v]] });
+  }
+  if (data.length === 0) return { updated: 0, skipped };
+  const sheets = await getSheetsClient();
+  try {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: { valueInputOption: 'USER_ENTERED', data }
+    });
+  } catch (e) {
+    throw wrapApiError(e, 502);
+  }
+  return { updated: data.length, skipped };
+}
+
 module.exports = {
   TAB_NAME,
   PAGE_URL_HEADER,
@@ -314,5 +362,6 @@ module.exports = {
   readReportTab,
   readTabAsText,
   writeRowMappedValues,
-  writeRowsBatch
+  writeRowsBatch,
+  writeCellsByHeader
 };

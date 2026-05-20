@@ -5,7 +5,7 @@ const { getTranscript, TranscriptError, getDiagnostics } = require('./youtubeTra
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
 const { scrapeInstagramPost } = require('./instagramScraper');
-const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch } = require('./sheetsService');
+const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch, writeCellsByHeader } = require('./sheetsService');
 const { processUrl } = require('./urlProcessor');
 const express = require('express');
 const app = express();
@@ -605,12 +605,16 @@ app.post('/api/sheets/write-rows', async (req, res) => {
   }
 });
 
-// POST { sheetUrl, prompt, includeTabs?: string[] }
-//   → { answer, model, usage, includedTabs, truncatedTabs, contextBytes }
+// POST { sheetUrl, prompt, includeTabs?: string[], writeBack?: boolean }
+//   → { answer, model, usage, includedTabs, truncatedTabs, contextBytes,
+//       cellsWritten:[{rowIndex,header,value}], cellsSkipped:[...], iterations }
 // Ask Claude a question about the contents of the Sheet. The `report` tab is
-// always included; additional tab names listed in includeTabs are appended
-// as extra context. Each tab's data is sent as TSV, capped per-tab and in
-// total to keep prompt size predictable.
+// always included; tabs listed in includeTabs are appended as extra context.
+//
+// When writeBack=true, Claude is given an `update_report_cells` tool and an
+// agentic loop runs (up to MAX_ITER turns), executing each tool call against
+// the report tab via writeCellsByHeader and feeding the results back into the
+// conversation until Claude stops emitting tool_use blocks.
 app.post('/api/sheets/ask', async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -619,7 +623,7 @@ app.post('/api/sheets/ask', async (req, res) => {
       message: 'ANTHROPIC_API_KEY is not set on the server.'
     });
   }
-  const { sheetUrl, prompt, includeTabs } = req.body || {};
+  const { sheetUrl, prompt, includeTabs, writeBack } = req.body || {};
   if (!sheetUrl || !prompt || typeof prompt !== 'string' || !prompt.trim()) {
     return res.status(400).json({
       error: 'MISSING_FIELDS',
@@ -639,6 +643,22 @@ app.post('/api/sheets/ask', async (req, res) => {
   if (Array.isArray(includeTabs)) {
     for (const t of includeTabs) {
       if (typeof t === 'string' && t && !requestedTabs.includes(t)) requestedTabs.push(t);
+    }
+  }
+
+  // For tool-use we need the report tab's header → column index map.
+  let reportHeaderIndex = null;
+  let reportHeaders = [];
+  if (writeBack) {
+    try {
+      const r = await readReportTab(spreadsheetId);
+      reportHeaderIndex = r.headerIndex;
+      reportHeaders = r.headers.filter(Boolean);
+    } catch (e) {
+      return res.status(e.status || 500).json({
+        error: e.code || 'SHEET_READ_FAILED',
+        message: e.message
+      });
     }
   }
 
@@ -672,49 +692,173 @@ app.post('/api/sheets/ask', async (req, res) => {
     });
   }
 
-  const systemPrompt =
+  let systemPrompt =
     `You are a data analyst evaluating rows from a Google Sheet on behalf of the user. ` +
     `Be concise, specific, and cite row numbers / column values when they support an answer. ` +
     `If the data is insufficient to answer, say so explicitly rather than guessing. ` +
-    `Each tab is provided as TSV. The first line of each tab is the header row.\n\n` +
-    tabContexts.join('\n\n');
+    `Each tab is provided as TSV. The first line of each tab is the header row. ` +
+    `Row numbers in the data correspond to 1-based spreadsheet row numbers (header is row 1, first data row is row 2).\n\n`;
+  if (writeBack) {
+    systemPrompt +=
+      `When the user asks you to record evaluations, statuses, scores, labels, or any other ` +
+      `value into a column of the report tab, you MUST use the \`update_report_cells\` tool to ` +
+      `write the values directly. Do not just describe what you would write \u2014 actually call the tool. ` +
+      `Batch many edits into a single tool call when possible. The exact set of writable headers in ` +
+      `the report tab is: ${reportHeaders.join(', ')}. ` +
+      `If the user references a header that is not in that list, do not invent a column \u2014 ` +
+      `tell the user the column doesn't exist and stop.\n\n`;
+  }
+  systemPrompt += tabContexts.join('\n\n');
 
-  let anthropicRes, body;
-  try {
-    anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type':     'application/json',
-        'x-api-key':        apiKey,
-        'anthropic-version':'2023-06-01'
+  const tools = writeBack ? [{
+    name: 'update_report_cells',
+    description:
+      'Write values to specific cells in the `report` tab of the Google Sheet. Use this whenever the ' +
+      'user asks you to populate, mark, label, score, or otherwise modify cells. Send as many edits ' +
+      'in a single call as possible (one edit per cell).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        edits: {
+          type: 'array',
+          description: 'List of cell edits to apply atomically.',
+          items: {
+            type: 'object',
+            properties: {
+              rowIndex: { type: 'integer', description: '1-based spreadsheet row number (header is row 1, first data row is row 2).' },
+              header:   { type: 'string',  description: 'Exact header name in row 1 of the report tab. Must be one of: ' + reportHeaders.join(', ') },
+              value:    { type: 'string',  description: 'Cell value to write. Use an empty string to clear.' }
+            },
+            required: ['rowIndex', 'header', 'value']
+          }
+        }
       },
-      body: JSON.stringify({
+      required: ['edits']
+    }
+  }] : null;
+
+  const messages = [{ role: 'user', content: prompt }];
+  const cellsWritten = [];
+  const cellsSkipped = [];
+  let answer = '';
+  let lastUsage = null;
+  let lastModel = 'claude-sonnet-4-5';
+  let iterations = 0;
+
+  const MAX_ITER = 8;
+  const MAX_CELLS = 2000;
+  const collectedText = [];
+
+  try {
+    while (iterations < MAX_ITER) {
+      iterations += 1;
+      const apiBody = {
         model:      'claude-sonnet-4-5',
         max_tokens: 4096,
         system:     systemPrompt,
-        messages:   [{ role: 'user', content: prompt }]
-      })
-    });
-    body = await anthropicRes.json().catch(() => ({}));
+        messages
+      };
+      if (tools) apiBody.tools = tools;
+
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type':     'application/json',
+          'x-api-key':        apiKey,
+          'anthropic-version':'2023-06-01'
+        },
+        body: JSON.stringify(apiBody)
+      });
+      const reply = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        return res.status(r.status).json({
+          error:   'ANTHROPIC_ERROR',
+          message: (reply && reply.error && reply.error.message) || JSON.stringify(reply).slice(0, 500)
+        });
+      }
+      lastUsage = reply.usage || lastUsage;
+      lastModel = reply.model || lastModel;
+
+      // Capture any text the assistant produced this turn (often present even alongside tool_use).
+      for (const block of reply.content || []) {
+        if (block.type === 'text' && block.text) collectedText.push(block.text);
+      }
+
+      // Append assistant message verbatim so tool_use IDs round-trip correctly.
+      messages.push({ role: 'assistant', content: reply.content || [] });
+
+      if (reply.stop_reason !== 'tool_use') {
+        answer = collectedText.join('\n').trim();
+        break;
+      }
+
+      // Execute every tool_use block, accumulating tool_result blocks.
+      const toolResults = [];
+      for (const block of reply.content || []) {
+        if (block.type !== 'tool_use') continue;
+        if (block.name !== 'update_report_cells') {
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            is_error: true,
+            content: `Unknown tool: ${block.name}`
+          });
+          continue;
+        }
+        const edits = (block.input && Array.isArray(block.input.edits)) ? block.input.edits : [];
+        const remaining = MAX_CELLS - cellsWritten.length;
+        const accepted  = edits.slice(0, Math.max(0, remaining));
+        const dropped   = edits.length - accepted.length;
+        try {
+          const result = await writeCellsByHeader(spreadsheetId, reportHeaderIndex, accepted);
+          const skippedKeys = new Set(result.skipped.map(s => `${s.edit && s.edit.rowIndex}|${s.edit && s.edit.header}`));
+          for (const e of accepted) {
+            const k = `${e.rowIndex}|${e.header}`;
+            if (skippedKeys.has(k)) continue;
+            cellsWritten.push({ rowIndex: e.rowIndex, header: e.header, value: e.value == null ? '' : String(e.value) });
+          }
+          for (const s of result.skipped) cellsSkipped.push(s);
+          let summary = `Wrote ${result.updated} cell${result.updated === 1 ? '' : 's'}.`;
+          if (result.skipped.length) {
+            summary += ` Skipped ${result.skipped.length}: ` +
+              result.skipped.slice(0, 5).map(s => `${s.reason} (row ${s.edit && s.edit.rowIndex}, header "${s.edit && s.edit.header}")`).join('; ');
+          }
+          if (dropped > 0) {
+            summary += ` Dropped ${dropped} additional edits — global cell-write budget (${MAX_CELLS}) reached.`;
+          }
+          summary += ` Available report headers: ${reportHeaders.join(', ')}.`;
+          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: summary });
+        } catch (e) {
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            is_error: true,
+            content: `Sheet write failed: ${e.message}`
+          });
+        }
+      }
+
+      messages.push({ role: 'user', content: toolResults });
+    }
+
+    if (!answer) {
+      answer = collectedText.join('\n').trim() ||
+        '(stopped after maximum tool-use iterations without a final answer)';
+    }
   } catch (e) {
     return res.status(502).json({ error: 'ANTHROPIC_FETCH_FAILED', message: e.message });
   }
-  if (!anthropicRes.ok) {
-    return res.status(anthropicRes.status).json({
-      error:   'ANTHROPIC_ERROR',
-      message: (body && body.error && body.error.message) || JSON.stringify(body).slice(0, 500)
-    });
-  }
-  const answer = Array.isArray(body.content)
-    ? body.content.filter(c => c && c.type === 'text').map(c => c.text).join('\n').trim()
-    : '';
+
   return res.json({
     answer,
-    model:         body.model || 'claude-sonnet-4-5',
-    usage:         body.usage || null,
+    model:         lastModel,
+    usage:         lastUsage,
     includedTabs:  requestedTabs,
     truncatedTabs,
-    contextBytes:  totalBytes
+    contextBytes:  totalBytes,
+    iterations,
+    cellsWritten,
+    cellsSkipped
   });
 });
 

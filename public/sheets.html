@@ -109,9 +109,17 @@ recommendation ← publishedAt</pre>
       <textarea id="llm-prompt" rows="4" placeholder="e.g. Which rows have the lowest viewCount relative to other videos from the same channel? Cite row numbers."></textarea>
     </div>
     <div class="row">
+      <label>
+        <input type="checkbox" id="llm-writeback" checked />
+        <strong>Let the LLM write changes back to the report tab</strong>
+        <span class="muted">(uses Claude tool-use; only headers that already exist in the report tab can be written)</span>
+      </label>
+    </div>
+    <div class="row">
       <button id="llm-ask-btn">Ask</button>
       <span id="llm-status" class="status muted"></span>
     </div>
+    <div id="llm-writes" class="panel" style="display:none; margin-top:12px;"></div>
     <div id="llm-response" class="panel" style="display:none; margin-top:12px;"></div>
     <div id="llm-meta" class="muted" style="display:none; margin-top:6px; font-size:12px;"></div>
   </div>
@@ -133,8 +141,10 @@ recommendation ← publishedAt</pre>
     const llmPanel            = document.getElementById('llm-panel');
     const tabPicker           = document.getElementById('tab-picker');
     const llmPrompt           = document.getElementById('llm-prompt');
+    const llmWriteback        = document.getElementById('llm-writeback');
     const llmAskBtn           = document.getElementById('llm-ask-btn');
     const llmStatus           = document.getElementById('llm-status');
+    const llmWrites           = document.getElementById('llm-writes');
     const llmResponse         = document.getElementById('llm-response');
     const llmMeta             = document.getElementById('llm-meta');
 
@@ -286,6 +296,7 @@ recommendation ← publishedAt</pre>
       llmPanel.style.display = 'block';
       llmResponse.style.display = 'none';
       llmMeta.style.display = 'none';
+      llmWrites.style.display = 'none';
       setLlmStatus('');
       setOverall(`Sheet validated. ${body.rows.length} row(s) ready.`, 'ok');
       preflightBtn.disabled = false;
@@ -300,7 +311,8 @@ recommendation ← publishedAt</pre>
       llmAskBtn.disabled = true;
       llmResponse.style.display = 'none';
       llmMeta.style.display = 'none';
-      setLlmStatus('Thinking…', 'muted');
+      llmWrites.style.display = 'none';
+      setLlmStatus(llmWriteback.checked ? 'Thinking… (may write back to the Sheet)' : 'Thinking…', 'muted');
 
       const includeTabs = selectedExtraTabs();
       let res, body;
@@ -311,7 +323,8 @@ recommendation ← publishedAt</pre>
           body: JSON.stringify({
             sheetUrl: sheetInput.value.trim(),
             prompt,
-            includeTabs
+            includeTabs,
+            writeBack: !!llmWriteback.checked
           })
         });
         body = await res.json().catch(() => ({}));
@@ -325,12 +338,36 @@ recommendation ← publishedAt</pre>
         llmAskBtn.disabled = false;
         return;
       }
+      // Render writes summary first (above the answer) when applicable.
+      const written = Array.isArray(body.cellsWritten) ? body.cellsWritten : [];
+      const skipped = Array.isArray(body.cellsSkipped) ? body.cellsSkipped : [];
+      if (written.length || skipped.length) {
+        const byHeader = {};
+        for (const w of written) {
+          (byHeader[w.header] = byHeader[w.header] || []).push(w);
+        }
+        let html = `<div><strong>Wrote ${written.length} cell${written.length === 1 ? '' : 's'} to the report tab.</strong></div>`;
+        for (const h of Object.keys(byHeader)) {
+          const sample = byHeader[h].slice(0, 8)
+            .map(w => `row ${w.rowIndex} → "${(w.value || '').replace(/"/g, '&quot;').slice(0, 60)}"`)
+            .join(', ');
+          const more = byHeader[h].length > 8 ? ` … (+${byHeader[h].length - 8} more)` : '';
+          html += `<div class="muted" style="font-size:12px; margin-top:4px;"><code>${h}</code>: ${sample}${more}</div>`;
+        }
+        if (skipped.length) {
+          html += `<div class="muted" style="font-size:12px; margin-top:6px; color:#b42318;">${skipped.length} edit${skipped.length === 1 ? '' : 's'} skipped (e.g. unknown header). Re-validate the sheet to see current headers.</div>`;
+        }
+        llmWrites.innerHTML = html;
+        llmWrites.style.display = 'block';
+      }
+
       llmResponse.textContent = body.answer || '(no answer)';
       llmResponse.style.display = 'block';
       const u = body.usage || {};
       const metaBits = [
         `model: ${body.model || 'claude-sonnet-4-5'}`,
         `context: ~${Math.round((body.contextBytes || 0) / 1024)} KB across ${(body.includedTabs || []).length} tab(s)`,
+        body.iterations != null ? `iterations: ${body.iterations}` : null,
         u.input_tokens != null ? `tokens in: ${u.input_tokens}` : null,
         u.output_tokens != null ? `tokens out: ${u.output_tokens}` : null,
         Array.isArray(body.truncatedTabs) && body.truncatedTabs.length
@@ -338,7 +375,7 @@ recommendation ← publishedAt</pre>
       ].filter(Boolean);
       llmMeta.textContent = metaBits.join(' · ');
       llmMeta.style.display = 'block';
-      setLlmStatus('Done.', 'ok');
+      setLlmStatus(written.length ? `Done. ${written.length} cell${written.length === 1 ? '' : 's'} written.` : 'Done.', 'ok');
       llmAskBtn.disabled = false;
     }
 
