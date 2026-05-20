@@ -91,7 +91,7 @@ recommendation ← publishedAt</pre>
 
   <script>
     const API_BASE = '';
-    const FETCH_CONCURRENCY  = 5;   // parallel URL fetches
+    const FETCH_CONCURRENCY  = 25;  // parallel URL fetches
     const WRITE_BATCH_SIZE   = 25;  // rows per Sheets API call
 
     const sheetInput          = document.getElementById('sheet-url');
@@ -116,14 +116,31 @@ recommendation ← publishedAt</pre>
       writeStatus.className = 'status ' + (cls || 'muted');
     }
 
+    // Collapse rows that share the same page_url into a single fetch task.
+    // Each task carries every rowIndex that should receive the result.
+    function buildUniqueTasks(rows) {
+      const map = new Map();
+      for (const r of rows) {
+        if (!map.has(r.pageUrl)) map.set(r.pageUrl, { pageUrl: r.pageUrl, rowIndexes: [] });
+        map.get(r.pageUrl).rowIndexes.push(r.rowIndex);
+      }
+      return Array.from(map.values());
+    }
+
     function renderPreflightSummary(pf) {
       const knownHeaders = ['Title','content_url','likeness_match','likeness_label','likeness_score','recommendation'];
       const present = knownHeaders.filter(h => h in pf.headerIndex);
       const missing = knownHeaders.filter(h => !(h in pf.headerIndex));
+      const tasks = buildUniqueTasks(pf.rows);
+      const dupeRows = pf.rows.length - tasks.length;
       preflightSummary.style.display = 'block';
       preflightSummary.innerHTML =
         `<div><strong>Spreadsheet:</strong> <code>${pf.spreadsheetId}</code></div>` +
-        `<div><strong>Rows with page_url:</strong> ${pf.rows.length}</div>` +
+        `<div><strong>Rows with page_url:</strong> ${pf.rows.length}` +
+        (dupeRows > 0
+          ? ` <span class="muted">(→ ${tasks.length} unique URLs; ${dupeRows} duplicate row${dupeRows === 1 ? '' : 's'} will reuse the fetched result)</span>`
+          : '') +
+        `</div>` +
         `<div><strong>Writable headers found:</strong> ${present.join(', ') || '(none)'}</div>` +
         (missing.length
           ? `<div class="muted"><strong>Headers not in sheet (will be skipped):</strong> ${missing.join(', ')}</div>`
@@ -201,51 +218,47 @@ recommendation ← publishedAt</pre>
       runBtn.disabled = body.rows.length === 0;
     }
 
-    // Fetch ONLY — returns the normalized payload, no Sheet write.
-    async function fetchRow(row, includeScreenshots) {
-      updateRowStatus(row.rowIndex, 'running');
+    // Fetch ONLY — one network call per unique URL. The result is fanned
+    // out to every row that shares the URL (UI status updated for each).
+    async function fetchUniqueTask(task, includeScreenshots) {
+      for (const r of task.rowIndexes) updateRowStatus(r, 'running');
       try {
         const res = await fetch(`${API_BASE}/api/sheets/fetch-row`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            pageUrl:  row.pageUrl,
-            rowIndex: row.rowIndex,
+            pageUrl: task.pageUrl,
             includeScreenshots
           })
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
-          updateRowStatus(row.rowIndex, 'err', {
-            error:   body.error || `HTTP_${res.status}`,
-            message: body.message || ''
-          });
-          return {
-            rowIndex:    row.rowIndex,
-            normalized:  null,
-            errorDetail: `${body.error || `HTTP_${res.status}`}: ${body.message || ''}`,
-            ok:          false
-          };
+          for (const r of task.rowIndexes) {
+            updateRowStatus(r, 'err', {
+              error:   body.error || `HTTP_${res.status}`,
+              message: body.message || ''
+            });
+          }
+          return { ok: false, normalized: null, rowIndexes: task.rowIndexes };
         }
-        updateRowStatus(row.rowIndex, body.ok ? 'fetched' : 'err', {
-          platform: body.platform,
-          error:    body.error,
-          message:  body.message
-        });
+        const status = body.ok ? 'fetched' : 'err';
+        for (const r of task.rowIndexes) {
+          updateRowStatus(r, status, {
+            platform: body.platform,
+            error:    body.error,
+            message:  body.message
+          });
+        }
         return {
-          rowIndex:    row.rowIndex,
-          normalized:  body.normalized || null,
-          errorDetail: body.ok ? null : `${body.error || 'UNKNOWN'}: ${body.message || ''}`,
-          ok:          !!body.ok
+          ok:         !!body.ok,
+          normalized: body.normalized || null,
+          rowIndexes: task.rowIndexes
         };
       } catch (e) {
-        updateRowStatus(row.rowIndex, 'err', { error: 'NETWORK_ERROR', message: e.message });
-        return {
-          rowIndex:    row.rowIndex,
-          normalized:  null,
-          errorDetail: `NETWORK_ERROR: ${e.message}`,
-          ok:          false
-        };
+        for (const r of task.rowIndexes) {
+          updateRowStatus(r, 'err', { error: 'NETWORK_ERROR', message: e.message });
+        }
+        return { ok: false, normalized: null, rowIndexes: task.rowIndexes };
       }
     }
 
@@ -297,31 +310,39 @@ recommendation ← publishedAt</pre>
       setWriteStatus('');
 
       const includeScreenshots = screenshotsCheckbox.checked;
-      const queue = preflight.rows.slice();
-      const total = queue.length;
+
+      // Dedupe by page_url — each unique URL is fetched once and the result
+      // is fanned out to every matching row.
+      const tasks      = buildUniqueTasks(preflight.rows);
+      const totalRows  = preflight.rows.length;
+      const totalTasks = tasks.length;
+      const dupeRows   = totalRows - totalTasks;
+
       let idx = 0;
-      let fetchedCount = 0, okCount = 0, failedCount = 0;
+      let tasksDone = 0;
+      let rowsOk = 0, rowsFailed = 0;
       let writeBuffer = [];
-      let writesDone = 0, writeRowsDone = 0, writeApiCalls = 0;
+      let writeRowsDone = 0, writeApiCalls = 0;
       let writeError = null;
 
       function updateOverall() {
-        const cls = (fetchedCount === total)
-          ? (failedCount > 0 ? 'err' : 'ok')
+        const cls = (tasksDone === totalTasks)
+          ? (rowsFailed > 0 ? 'err' : 'ok')
           : 'muted';
+        const dedupeNote = dupeRows > 0
+          ? ` — ${totalRows} row${totalRows === 1 ? '' : 's'}, deduped to ${totalTasks} unique URL${totalTasks === 1 ? '' : 's'}`
+          : '';
         setOverall(
-          `Fetched ${fetchedCount} / ${total} (${okCount} ok, ${failedCount} failed)`, cls);
+          `Fetched ${tasksDone} / ${totalTasks} unique URLs (rows: ${rowsOk} ok, ${rowsFailed} failed)${dedupeNote}`, cls);
       }
       function updateWrite() {
-        // We only write successful rows back, so the denominator is okCount
-        // (which grows as fetches complete). Skipped failures are excluded.
-        const expectedWrites = okCount;
+        const expectedWrites = rowsOk;
         const cls = writeError
           ? 'err'
-          : (fetchedCount === total && writeRowsDone === expectedWrites ? 'ok' : 'muted');
+          : (tasksDone === totalTasks && writeRowsDone === expectedWrites ? 'ok' : 'muted');
         setWriteStatus(
           `Wrote ${writeRowsDone} of ${expectedWrites} successful row${expectedWrites === 1 ? '' : 's'} back to Sheet ` +
-          `(${writeApiCalls} Sheets API call${writeApiCalls === 1 ? '' : 's'}${failedCount ? `; ${failedCount} skipped` : ''})` +
+          `(${writeApiCalls} Sheets API call${writeApiCalls === 1 ? '' : 's'}${rowsFailed ? `; ${rowsFailed} skipped` : ''})` +
           (writeError ? ` — last error: ${writeError}` : ''), cls);
       }
 
@@ -339,7 +360,7 @@ recommendation ← publishedAt</pre>
             writeRowsDone += chunk.length;
           } else {
             writeError = `${result.error}: ${result.message}`;
-            writeRowsDone += chunk.length; // count them as accounted-for
+            writeRowsDone += chunk.length;
           }
           updateWrite();
         });
@@ -347,19 +368,20 @@ recommendation ← publishedAt</pre>
       }
 
       async function worker() {
-        while (idx < queue.length) {
+        while (idx < tasks.length) {
           const cur = idx++;
-          const row = queue[cur];
-          const out = await fetchRow(row, includeScreenshots);
-          fetchedCount += 1;
-          if (out.ok) okCount += 1; else failedCount += 1;
-          // Failed rows are skipped: don't write anything to the Sheet,
-          // leaving existing cell content untouched.
+          const task = tasks[cur];
+          const out = await fetchUniqueTask(task, includeScreenshots);
+          tasksDone += 1;
+          const n = out.rowIndexes.length;
           if (out.ok) {
-            writeBuffer.push({
-              rowIndex:   out.rowIndex,
-              normalized: out.normalized
-            });
+            rowsOk += n;
+            // Fan out: write the same normalized payload to every duplicate row.
+            for (const rowIndex of out.rowIndexes) {
+              writeBuffer.push({ rowIndex, normalized: out.normalized });
+            }
+          } else {
+            rowsFailed += n;
           }
           updateOverall();
           if (writeBuffer.length >= WRITE_BATCH_SIZE) {
@@ -369,18 +391,23 @@ recommendation ← publishedAt</pre>
         }
       }
 
-      const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, total) }, () => worker());
+      const workers = Array.from(
+        { length: Math.min(FETCH_CONCURRENCY, totalTasks) },
+        () => worker()
+      );
       await Promise.all(workers);
 
-      // Flush any remaining buffered rows
       if (writeBuffer.length > 0) {
         const chunk = writeBuffer.splice(0, writeBuffer.length);
         scheduleFlush(chunk);
       }
       await writeChainTail;
 
-      const finalCls = (failedCount > 0 || writeError) ? 'err' : 'ok';
-      setOverall(`Done. ${okCount} ok, ${failedCount} failed (of ${total}).`, finalCls);
+      const finalCls = (rowsFailed > 0 || writeError) ? 'err' : 'ok';
+      setOverall(
+        `Done. ${rowsOk} ok, ${rowsFailed} failed (of ${totalRows} row${totalRows === 1 ? '' : 's'}` +
+        (dupeRows > 0 ? `, ${totalTasks} unique fetch${totalTasks === 1 ? '' : 'es'}` : '') + `).`,
+        finalCls);
       runBtn.disabled = false;
       preflightBtn.disabled = false;
     }
