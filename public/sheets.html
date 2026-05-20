@@ -29,6 +29,11 @@
     .url-cell { max-width: 440px; word-break: break-all; font-family: monospace; font-size: 12px; }
     .err-cell { max-width: 360px; color: #b42318; font-size: 12px; }
     pre.help { background: #f6f8fa; padding: 10px; border-radius: 6px; font-size: 12px; overflow-x: auto; }
+    textarea { width: 100%; padding: 10px; box-sizing: border-box; font-family: inherit; font-size: 14px; resize: vertical; }
+    .tab-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; margin: 0 6px 6px 0; border: 1px solid #d0d7de; border-radius: 14px; background: #fff; font-size: 13px; cursor: pointer; user-select: none; }
+    .tab-pill input { margin: 0; }
+    .tab-pill.required { background: #eef6ff; border-color: #b6d4ff; cursor: not-allowed; opacity: 0.85; }
+    #llm-response { white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.55; }
   </style>
 </head>
 <body>
@@ -89,6 +94,28 @@ recommendation ← publishedAt</pre>
     <tbody></tbody>
   </table>
 
+  <div id="llm-panel" class="panel" style="display: none;">
+    <h3 style="margin-top:0;">Ask the LLM about this report</h3>
+    <p class="muted" style="margin-top:4px;">
+      Anthropic Claude reads the selected tabs (as TSV) plus your prompt and returns an answer.
+      The <code>report</code> tab is always included. Add other tabs if your question needs them.
+    </p>
+    <div class="row">
+      <div><strong>Tabs to include as context:</strong></div>
+      <div id="tab-picker" style="margin-top:6px;"></div>
+    </div>
+    <div class="row">
+      <label for="llm-prompt"><strong>Prompt</strong></label>
+      <textarea id="llm-prompt" rows="4" placeholder="e.g. Which rows have the lowest viewCount relative to other videos from the same channel? Cite row numbers."></textarea>
+    </div>
+    <div class="row">
+      <button id="llm-ask-btn">Ask</button>
+      <span id="llm-status" class="status muted"></span>
+    </div>
+    <div id="llm-response" class="panel" style="display:none; margin-top:12px;"></div>
+    <div id="llm-meta" class="muted" style="display:none; margin-top:6px; font-size:12px;"></div>
+  </div>
+
   <script>
     const API_BASE = '';
     const FETCH_CONCURRENCY  = 25;  // parallel URL fetches
@@ -103,6 +130,13 @@ recommendation ← publishedAt</pre>
     const preflightSummary    = document.getElementById('preflight-summary');
     const rowsTable           = document.getElementById('rows-table');
     const rowsTbody           = rowsTable.querySelector('tbody');
+    const llmPanel            = document.getElementById('llm-panel');
+    const tabPicker           = document.getElementById('tab-picker');
+    const llmPrompt           = document.getElementById('llm-prompt');
+    const llmAskBtn           = document.getElementById('llm-ask-btn');
+    const llmStatus           = document.getElementById('llm-status');
+    const llmResponse         = document.getElementById('llm-response');
+    const llmMeta             = document.getElementById('llm-meta');
 
     let preflight = null; // { spreadsheetId, headers, headerIndex, rows }
 
@@ -114,6 +148,41 @@ recommendation ← publishedAt</pre>
       writeStatus.style.display = text ? 'block' : 'none';
       writeStatus.textContent = text || '';
       writeStatus.className = 'status ' + (cls || 'muted');
+    }
+    function setLlmStatus(text, cls) {
+      llmStatus.textContent = text || '';
+      llmStatus.className = 'status ' + (cls || 'muted');
+    }
+
+    // Render checkboxes for every tab in the sheet. `report` is forced on.
+    function renderTabPicker(tabs) {
+      tabPicker.innerHTML = '';
+      if (!Array.isArray(tabs) || tabs.length === 0) {
+        tabPicker.innerHTML = '<span class="muted">No tabs detected.</span>';
+        return;
+      }
+      for (const t of tabs) {
+        const required = t.title === 'report';
+        const label = document.createElement('label');
+        label.className = 'tab-pill' + (required ? ' required' : '');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = t.title;
+        cb.checked = required;
+        cb.disabled = required;
+        cb.dataset.tabName = t.title;
+        label.appendChild(cb);
+        const txt = document.createElement('span');
+        txt.textContent = t.title + (t.rowCount ? ` (${t.rowCount})` : '');
+        label.appendChild(txt);
+        tabPicker.appendChild(label);
+      }
+    }
+
+    function selectedExtraTabs() {
+      return Array.from(tabPicker.querySelectorAll('input[type="checkbox"]'))
+        .filter(cb => cb.checked && !cb.disabled)
+        .map(cb => cb.value);
     }
 
     // Collapse rows that share the same page_url into a single fetch task.
@@ -213,9 +282,64 @@ recommendation ← publishedAt</pre>
       preflight = body;
       renderPreflightSummary(body);
       renderRows(body.rows);
+      renderTabPicker(body.tabs || []);
+      llmPanel.style.display = 'block';
+      llmResponse.style.display = 'none';
+      llmMeta.style.display = 'none';
+      setLlmStatus('');
       setOverall(`Sheet validated. ${body.rows.length} row(s) ready.`, 'ok');
       preflightBtn.disabled = false;
       runBtn.disabled = body.rows.length === 0;
+    }
+
+    async function askLlm() {
+      if (!preflight) { setLlmStatus('Validate a Sheet first.', 'err'); return; }
+      const prompt = (llmPrompt.value || '').trim();
+      if (!prompt) { setLlmStatus('Enter a prompt first.', 'err'); return; }
+
+      llmAskBtn.disabled = true;
+      llmResponse.style.display = 'none';
+      llmMeta.style.display = 'none';
+      setLlmStatus('Thinking…', 'muted');
+
+      const includeTabs = selectedExtraTabs();
+      let res, body;
+      try {
+        res = await fetch(`${API_BASE}/api/sheets/ask`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sheetUrl: sheetInput.value.trim(),
+            prompt,
+            includeTabs
+          })
+        });
+        body = await res.json().catch(() => ({}));
+      } catch (e) {
+        setLlmStatus(`Network error: ${e.message}`, 'err');
+        llmAskBtn.disabled = false;
+        return;
+      }
+      if (!res.ok) {
+        setLlmStatus(`${body.error || 'ASK_FAILED'}: ${body.message || ''}`, 'err');
+        llmAskBtn.disabled = false;
+        return;
+      }
+      llmResponse.textContent = body.answer || '(no answer)';
+      llmResponse.style.display = 'block';
+      const u = body.usage || {};
+      const metaBits = [
+        `model: ${body.model || 'claude-sonnet-4-5'}`,
+        `context: ~${Math.round((body.contextBytes || 0) / 1024)} KB across ${(body.includedTabs || []).length} tab(s)`,
+        u.input_tokens != null ? `tokens in: ${u.input_tokens}` : null,
+        u.output_tokens != null ? `tokens out: ${u.output_tokens}` : null,
+        Array.isArray(body.truncatedTabs) && body.truncatedTabs.length
+          ? `truncated: ${body.truncatedTabs.join(', ')}` : null
+      ].filter(Boolean);
+      llmMeta.textContent = metaBits.join(' · ');
+      llmMeta.style.display = 'block';
+      setLlmStatus('Done.', 'ok');
+      llmAskBtn.disabled = false;
     }
 
     // Fetch ONLY — one network call per unique URL. The result is fanned
@@ -415,6 +539,10 @@ recommendation ← publishedAt</pre>
     preflightBtn.addEventListener('click', preflightSheet);
     runBtn.addEventListener('click', processAllRows);
     sheetInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') preflightSheet(); });
+    llmAskBtn.addEventListener('click', askLlm);
+    llmPrompt.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') askLlm();
+    });
   </script>
 </body>
 </html>

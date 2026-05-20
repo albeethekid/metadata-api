@@ -5,7 +5,7 @@ const { getTranscript, TranscriptError, getDiagnostics } = require('./youtubeTra
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
 const { scrapeInstagramPost } = require('./instagramScraper');
-const { extractSpreadsheetId, readReportTab, writeRowMappedValues, writeRowsBatch } = require('./sheetsService');
+const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch } = require('./sheetsService');
 const { processUrl } = require('./urlProcessor');
 const express = require('express');
 const app = express();
@@ -603,6 +603,119 @@ app.post('/api/sheets/write-rows', async (req, res) => {
       message: e.message
     });
   }
+});
+
+// POST { sheetUrl, prompt, includeTabs?: string[] }
+//   → { answer, model, usage, includedTabs, truncatedTabs, contextBytes }
+// Ask Claude a question about the contents of the Sheet. The `report` tab is
+// always included; additional tab names listed in includeTabs are appended
+// as extra context. Each tab's data is sent as TSV, capped per-tab and in
+// total to keep prompt size predictable.
+app.post('/api/sheets/ask', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({
+      error: 'MISSING_ANTHROPIC_KEY',
+      message: 'ANTHROPIC_API_KEY is not set on the server.'
+    });
+  }
+  const { sheetUrl, prompt, includeTabs } = req.body || {};
+  if (!sheetUrl || !prompt || typeof prompt !== 'string' || !prompt.trim()) {
+    return res.status(400).json({
+      error: 'MISSING_FIELDS',
+      message: 'sheetUrl and a non-empty prompt are required.'
+    });
+  }
+  const spreadsheetId = extractSpreadsheetId(sheetUrl);
+  if (!spreadsheetId) {
+    return res.status(400).json({
+      error: 'BAD_SHEET_URL',
+      message: 'Could not extract spreadsheetId from sheetUrl.'
+    });
+  }
+
+  // Always include the report tab; merge with optional extras (deduped, order preserved).
+  const requestedTabs = ['report'];
+  if (Array.isArray(includeTabs)) {
+    for (const t of includeTabs) {
+      if (typeof t === 'string' && t && !requestedTabs.includes(t)) requestedTabs.push(t);
+    }
+  }
+
+  const PER_TAB_BYTES = 80_000;
+  const TOTAL_MAX_BYTES = 240_000;
+  const tabContexts = [];
+  const truncatedTabs = [];
+  let totalBytes = 0;
+
+  try {
+    for (const tab of requestedTabs) {
+      const remaining = TOTAL_MAX_BYTES - totalBytes;
+      if (remaining < 1024) {
+        truncatedTabs.push(tab);
+        tabContexts.push(`=== Tab: ${tab} ===\n(omitted — total context budget reached)`);
+        continue;
+      }
+      const cap = Math.min(PER_TAB_BYTES, remaining);
+      const r = await readTabAsText(spreadsheetId, tab, { maxBytes: cap });
+      totalBytes += r.bytes;
+      const rowNote = r.truncated
+        ? `${r.rows} of ${r.totalRows} rows shown (truncated)`
+        : `${r.rows} row${r.rows === 1 ? '' : 's'}`;
+      tabContexts.push(`=== Tab: ${tab} (${rowNote}) ===\n${r.text}`);
+      if (r.truncated) truncatedTabs.push(tab);
+    }
+  } catch (e) {
+    return res.status(e.status || 500).json({
+      error: e.code || 'SHEET_READ_FAILED',
+      message: e.message
+    });
+  }
+
+  const systemPrompt =
+    `You are a data analyst evaluating rows from a Google Sheet on behalf of the user. ` +
+    `Be concise, specific, and cite row numbers / column values when they support an answer. ` +
+    `If the data is insufficient to answer, say so explicitly rather than guessing. ` +
+    `Each tab is provided as TSV. The first line of each tab is the header row.\n\n` +
+    tabContexts.join('\n\n');
+
+  let anthropicRes, body;
+  try {
+    anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type':     'application/json',
+        'x-api-key':        apiKey,
+        'anthropic-version':'2023-06-01'
+      },
+      body: JSON.stringify({
+        model:      'claude-sonnet-4-5',
+        max_tokens: 4096,
+        system:     systemPrompt,
+        messages:   [{ role: 'user', content: prompt }]
+      })
+    });
+    body = await anthropicRes.json().catch(() => ({}));
+  } catch (e) {
+    return res.status(502).json({ error: 'ANTHROPIC_FETCH_FAILED', message: e.message });
+  }
+  if (!anthropicRes.ok) {
+    return res.status(anthropicRes.status).json({
+      error:   'ANTHROPIC_ERROR',
+      message: (body && body.error && body.error.message) || JSON.stringify(body).slice(0, 500)
+    });
+  }
+  const answer = Array.isArray(body.content)
+    ? body.content.filter(c => c && c.type === 'text').map(c => c.text).join('\n').trim()
+    : '';
+  return res.json({
+    answer,
+    model:         body.model || 'claude-sonnet-4-5',
+    usage:         body.usage || null,
+    includedTabs:  requestedTabs,
+    truncatedTabs,
+    contextBytes:  totalBytes
+  });
 });
 
 // POST { spreadsheetId, rowIndex, pageUrl, headerIndex, includeScreenshots? }

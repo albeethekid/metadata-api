@@ -117,15 +117,18 @@ async function readReportTab(spreadsheetId) {
   try {
     meta = await sheets.spreadsheets.get({
       spreadsheetId,
-      fields: 'sheets.properties(title)'
+      fields: 'sheets.properties(title,gridProperties(rowCount,columnCount))'
     });
   } catch (e) {
     throw wrapApiError(e, 502);
   }
 
-  const tabs = (meta.data.sheets || [])
-    .map(s => s.properties && s.properties.title)
-    .filter(Boolean);
+  const tabsMeta = (meta.data.sheets || []).map(s => ({
+    title:       s.properties && s.properties.title,
+    rowCount:    s.properties && s.properties.gridProperties && s.properties.gridProperties.rowCount    || 0,
+    columnCount: s.properties && s.properties.gridProperties && s.properties.gridProperties.columnCount || 0
+  })).filter(t => t.title);
+  const tabs = tabsMeta.map(t => t.title);
   if (!tabs.includes(TAB_NAME)) {
     const err = new Error(
       `Tab "${TAB_NAME}" not found in this Sheet. Available tabs: ${tabs.join(', ') || '(none)'}`
@@ -178,7 +181,48 @@ async function readReportTab(spreadsheetId) {
     });
   }
 
-  return { spreadsheetId, headers, headerIndex, rows };
+  return { spreadsheetId, headers, headerIndex, rows, tabs: tabsMeta };
+}
+
+/**
+ * Read any tab and return it as a TSV-style text blob, capped at `maxBytes`.
+ * Used to feed sheet context into the LLM. Header row is the first row.
+ *
+ * @returns {Promise<{text:string, rows:number, totalRows:number, columns:number, truncated:boolean, bytes:number}>}
+ */
+async function readTabAsText(spreadsheetId, tabName, opts = {}) {
+  const maxBytes = Math.max(1024, opts.maxBytes || 60_000);
+  const sheets = await getSheetsClient();
+  let resp;
+  try {
+    resp = await sheets.spreadsheets.values.get({ spreadsheetId, range: tabName });
+  } catch (e) {
+    throw wrapApiError(e, 502);
+  }
+  const values = resp.data.values || [];
+  const lines = [];
+  let bytes = 0;
+  let truncated = false;
+  let columns = 0;
+  for (const row of values) {
+    if (Array.isArray(row) && row.length > columns) columns = row.length;
+    const line = (row || []).map(v => (v == null ? '' : String(v).replace(/\t/g, ' ').replace(/\r?\n/g, ' '))).join('\t');
+    const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+    if (bytes + lineBytes > maxBytes) {
+      truncated = true;
+      break;
+    }
+    lines.push(line);
+    bytes += lineBytes;
+  }
+  return {
+    text:      lines.join('\n'),
+    rows:      lines.length,
+    totalRows: values.length,
+    columns,
+    truncated,
+    bytes
+  };
 }
 
 /**
@@ -268,6 +312,7 @@ module.exports = {
   COLUMN_MAP,
   extractSpreadsheetId,
   readReportTab,
+  readTabAsText,
   writeRowMappedValues,
   writeRowsBatch
 };
