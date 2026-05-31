@@ -4,5 +4,6 @@ npm-debug.log
 .git
 .gitignore
 *.md
+!API_REFERENCE.md
 *.pdf
 .DS_Store
