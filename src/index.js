@@ -7,6 +7,8 @@ const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp'
 const { scrapeInstagramPost } = require('./instagramScraper');
 const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch, writeCellsByHeader } = require('./sheetsService');
 const { processUrl } = require('./urlProcessor');
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 8080;
@@ -2611,7 +2613,11 @@ function renderIndexHtml(data) {
 </head>
 <body>
   <h1>${escapeHtml(data.message)}</h1>
-  <p class="lead">Browse the UI tools and try API endpoints directly. Append <code>?format=json</code> to this page for the machine-readable index.</p>
+  <p class="lead">
+    Browse the UI tools and try API endpoints directly.
+    Full parameter docs: <a href="/docs"><strong>API Reference</strong></a>.
+    Machine-readable index: <a href="/?format=json"><code>/?format=json</code></a>.
+  </p>
 
   <h2>UI Tools</h2>
   <div class="cards">${uiCards}</div>
@@ -2619,8 +2625,8 @@ function renderIndexHtml(data) {
   ${groupSections}
 
   <footer>
-    See <code>API_REFERENCE.md</code> in the repo for full parameter docs.
-    JSON index: <a href="/?format=json">/?format=json</a>
+    See the <a href="/docs">API Reference</a> for full parameter docs
+    (raw markdown at <a href="/api-reference.md"><code>/api-reference.md</code></a>).
   </footer>
 </body>
 </html>`;
@@ -2632,6 +2638,85 @@ app.get('/', (req, res) => {
   }
   res.set('Content-Type', 'text/html; charset=utf-8');
   res.send(renderIndexHtml(indexData));
+});
+
+// Raw markdown of the API reference, served straight from the repo root.
+// Re-read on every request so edits to API_REFERENCE.md show up without a
+// server restart.
+const API_REFERENCE_PATH = path.join(__dirname, '..', 'API_REFERENCE.md');
+app.get('/api-reference.md', (req, res) => {
+  fs.readFile(API_REFERENCE_PATH, 'utf8', (err, data) => {
+    if (err) {
+      return res.status(404).type('text/plain').send('API_REFERENCE.md not found');
+    }
+    res.set('Content-Type', 'text/markdown; charset=utf-8');
+    res.send(data);
+  });
+});
+
+// Pretty-rendered docs page. Fetches the markdown above and renders it
+// client-side via marked.js (CDN) — no build step, stays in sync with the file.
+app.get('/docs', (req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon-512.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <title>API Reference</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown-light.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css" />
+  <style>
+    body { margin: 0; background: #fff; color: #24292f; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .topbar { position: sticky; top: 0; z-index: 10; background: rgba(255,255,255,0.95); backdrop-filter: blur(6px); border-bottom: 1px solid #d8dee4; padding: 10px 20px; display: flex; align-items: center; gap: 16px; }
+    .topbar a { color: #1a4dcc; text-decoration: none; font-size: 14px; font-weight: 600; }
+    .topbar a:hover { text-decoration: underline; }
+    .topbar .sep { color: #d8dee4; }
+    .topbar .raw { margin-left: auto; font-size: 13px; color: #57606a; font-weight: 400; }
+    .markdown-body { box-sizing: border-box; max-width: 980px; margin: 24px auto 80px; padding: 0 24px; }
+    .markdown-body pre { position: relative; }
+    .markdown-body pre code.hljs { background: #f6f8fa; }
+    @media (max-width: 767px) { .markdown-body { padding: 0 16px; margin: 16px auto 60px; } }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/">\u2190 Index</a>
+    <span class="sep">|</span>
+    <strong>API Reference</strong>
+    <span class="raw"><a href="/api-reference.md">view raw markdown</a></span>
+  </div>
+  <article id="content" class="markdown-body">Loading\u2026</article>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script>
+    (async () => {
+      const target = document.getElementById('content');
+      try {
+        const res = await fetch('/api-reference.md', { cache: 'no-cache' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const md = await res.text();
+        marked.setOptions({ gfm: true, breaks: false, headerIds: true, mangle: false });
+        target.innerHTML = marked.parse(md);
+        // Syntax highlight all code blocks
+        document.querySelectorAll('pre code').forEach(b => { try { hljs.highlightElement(b); } catch (_) {} });
+        // Anchor scroll if URL had a hash
+        if (location.hash) {
+          const el = document.getElementById(location.hash.slice(1));
+          if (el) el.scrollIntoView();
+        }
+      } catch (e) {
+        target.innerHTML = '<p style="color:#b42318;">Failed to load API_REFERENCE.md: ' + (e && e.message ? e.message : e) + '</p>';
+      }
+    })();
+  </script>
+</body>
+</html>`);
 });
 
 // Debug endpoint to verify proxy configuration

@@ -599,7 +599,122 @@ Returns a JSON object describing the server and some example routes.
 
 # UI Pages (Frontend)
 
-This repo serves a couple of static HTML pages from `public/` that call the API routes listed above.
+This repo serves a set of static HTML pages from `public/` that call the API routes listed above. Each tool is a thin client over the same JSON endpoints, so anything the UI does is also available via direct HTTP calls.
+
+| Page | Tool |
+|---|---|
+| `/sheets.html` | Vermillio Report Augmentation (Google Sheets) |
+| `/csv.html` | CSV Generator (paste-URL batch processor) |
+| `/channels.html` | Channel / profile search across platforms |
+| `/discover-siblings.html` | Sibling discovery from a SERP CSV |
+| `/screenshot.html` | Bulk screenshot capture |
+
+---
+
+## Report Augmentation UI: `GET /sheets.html`
+
+Source: `public/sheets.html` · Backend module: `src/sheetsService.js`
+
+A Google-Sheets-driven processor that reads URLs out of a sheet, fetches normalized metadata for each, writes the results back into the same row, and (optionally) lets an LLM evaluate the resulting report and edit cells directly.
+
+### Sheet requirements
+
+The Sheet must have:
+
+1. A tab literally named **`report`** (case-sensitive).
+2. A header row in row 1 of `report` that includes a column literally named **`page_url`**. Other column positions don't matter — the writer matches by header name, not by column letter.
+3. The sheet must be shared with the service account email (read **and** write) referenced by the server's Google credentials. A read-only share will fail at write time, not preflight.
+
+The header row may contain any subset of the augmentation columns the server knows how to write — missing headers are silently skipped, so partial schemas are fine.
+
+### Column mapping
+
+When a row is processed, the normalized payload from the per-platform fetch is mapped onto the following headers in the `report` tab. Headers not present in row 1 are skipped; row positions are matched by header name.
+
+| Sheet header | Normalized field | Source |
+|---|---|---|
+| `Title` | `title` | platform fetch |
+| `content_url` | `heroImageUrl` | platform fetch |
+| `likeness_match` | `channelHandle` | platform fetch |
+| `likeness_label` | `durationSeconds` | platform fetch |
+| `likeness_score` | `viewCount` | platform fetch |
+| `recommendation` | `publishedAt` | platform fetch |
+
+This mapping lives in `COLUMN_MAP` in `src/sheetsService.js` — that array is the source of truth.
+
+### Workflow
+
+The UI runs in three phases: **Validate Sheet → Process Rows → (optional) Ask the LLM**.
+
+#### 1. Validate Sheet (preflight)
+
+Calls `POST /api/sheets/preflight` with `{ sheetUrl }`. The server:
+
+- Extracts the spreadsheet ID from the pasted URL.
+- Lists every tab in the spreadsheet (with row counts) so the LLM panel can offer them as additional context.
+- Confirms the `report` tab exists and that row 1 contains a `page_url` header.
+- Returns every row with a non-empty `page_url`, paired with its 1-based spreadsheet row number.
+
+The UI then renders a row table (one row per source row) and reveals the LLM Q&A panel.
+
+#### 2. Process Rows
+
+The UI splits work into two independent pipelines so writes are batched cheaply against the Sheets API:
+
+- **Fetch pipeline (parallel, `FETCH_CONCURRENCY = 25`).**
+  Unique `page_url` values are deduped first — multiple sheet rows pointing to the same URL share a single fetch. Each unique URL is sent to `POST /api/sheets/fetch-row`, which internally routes through the same per-platform endpoints the CSV Generator uses (`/api/video/...`, `/api/tiktok/ytdlp`, `/api/instagram/video`, etc.). Per-row failures return `ok: false` with `error`/`message` rather than aborting the batch.
+
+- **Write pipeline (chunked, `WRITE_BATCH_SIZE = 25`).**
+  Successful results accumulate into chunks; each chunk is flushed via `POST /api/sheets/write-rows`, which performs **one** `spreadsheets.values.batchUpdate` call (one Sheets-API quota unit) covering up to 25 rows × N columns. This is the key cost optimization: a 500-row sheet costs 20 write calls instead of 500.
+
+The UI updates each row's status pill in real time: `pending → running → fetched → ok` (or `err`).
+
+#### 3. Ask the LLM (optional)
+
+Once preflight succeeds, an "Ask the LLM about this report" panel appears. It calls `POST /api/sheets/ask` with the user's prompt, the sheet URL, and a tab-selector list. See the `/api/sheets/ask` section below for full behavior; the short version:
+
+- Always includes the `report` tab (as TSV) plus any extra tabs the user selects.
+- Per-tab cap: ~80 KB; total cap: ~240 KB. Truncation is reported back in the response.
+- If **"Let the LLM write changes back to the report tab"** is checked (default: on), Claude is given an `update_report_cells` tool. The server runs an agentic loop (up to 8 turns, up to 2,000 cells written total), executing each `tool_use` block against the `report` tab via `writeCellsByHeader` and feeding results back into the conversation until Claude stops emitting tool calls.
+- Only headers that already exist in row 1 of `report` can be written. Claude is told the exact list of valid headers and is instructed to refuse rather than invent new columns.
+- The UI surfaces a per-header summary of what was written (`status: row 7 → "looks pretty bad", row 12 → "not enough info" …`).
+
+### Backend endpoints
+
+The Sheets Processor UI is a thin client over these routes. They are also documented in their own sections, but listed together here for convenience.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/sheets/preflight` | Validate sheet, list tabs, return rows-with-`page_url` |
+| `POST /api/sheets/fetch-row` | Fetch normalized metadata for a single URL (no Sheet I/O) |
+| `POST /api/sheets/write-rows` | Batch-write up to N normalized results into the `report` tab in one Sheets API call |
+| `POST /api/sheets/ask` | Claude Q&A over the sheet contents, with optional tool-use writeback |
+| `POST /api/sheets/process-row` | Legacy single-shot fetch+write per row (kept for ad-hoc / scripted use) |
+
+### Implementation notes
+
+- **Header-name-only writes.** The writer never assumes column positions. It builds `A1` ranges from `headerIndex[headerName]` at request time, so reordering columns in the Sheet does not break the integration.
+- **Sticky duplicate handling.** If the same URL appears in N rows, only one fetch happens and the result is fanned out to all N rows. Each row's status pill still updates independently.
+- **Quota accounting.** The Sheets API write cost is dominated by the number of `batchUpdate` calls, not the number of cells. With 25-row chunks, a typical 200-row sheet incurs ~8 write calls. Reads are cheap regardless.
+- **Auth.** The server uses a service account (Google credentials configured server-side). The UI never sees credentials; it only handles the sheet URL.
+- **LLM model.** `claude-sonnet-4-5` (Anthropic Messages API), called directly via `fetch` — no SDK dependency. Requires `ANTHROPIC_API_KEY` server-side.
+
+### Errors
+
+The UI surfaces backend error codes verbatim. Common ones:
+
+| Code | Meaning |
+|---|---|
+| `BAD_SHEET_URL` | URL didn't contain a recognizable spreadsheet ID |
+| `SHEET_NOT_ACCESSIBLE` | Service account isn't a viewer/editor on the sheet |
+| `TAB_NOT_FOUND` | No tab literally named `report` |
+| `TAB_EMPTY` | `report` tab has no rows |
+| `COLUMN_NOT_FOUND` | `page_url` header is missing from row 1 |
+| `MISSING_ANTHROPIC_KEY` | LLM panel was used but the server has no `ANTHROPIC_API_KEY` |
+| `ANTHROPIC_ERROR` | Upstream Anthropic API error (forwarded verbatim) |
+| `YOUTUBE_QUOTA_EXHAUSTED` | All configured YouTube API keys hit their daily quota; affects rows whose `page_url` is YouTube |
+
+---
 
 ## CSV Generator UI: `GET /csv.html`
 
