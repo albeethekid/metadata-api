@@ -32,7 +32,8 @@
   <h1>Sibling Discovery – SERP CSV Enrichment</h1>
   <p class="desc">
     Upload a SERP results CSV. For each YouTube row with a channel reference in
-    <code>likeness_match</code> and a title in <code>client_category_override</code>,
+    <code>handle</code> (falls back to legacy <code>likeness_match</code>) and a title in
+    <code>client_category_override</code>,
     the endpoint scans the channel for related videos and appends them as new rows.
   </p>
 
@@ -152,6 +153,13 @@
       return val.startsWith('@') || /^UC[\w-]{20,}$/.test(val);
     }
 
+    // Channel ref lives in `handle` now; older CSVs used `likeness_match`.
+    function channelRefOf(row) {
+      const handle = (row.handle || '').trim();
+      if (isChannelRef(handle)) return handle;
+      return (row.likeness_match || '').trim();
+    }
+
     // ── Concurrency helper (same pattern as csv.html) ─────────────────────────
 
     async function runWithLimit(tasks, limit, onProgress) {
@@ -185,12 +193,12 @@
         const platform = (row.platform || '').toUpperCase();
         if (platform !== 'YOUTUBE') { rowsSkipped++; continue; }
 
-        const channelId = (row.likeness_match || '').trim();
+        const channelId = channelRefOf(row);
         const query     = (row.client_category_override || '').trim();
 
         if (!isChannelRef(channelId)) {
           rowsSkipped++;
-          messages.push(`Row ${i + 2}: skipped — no valid channel ref in likeness_match ("${channelId.slice(0, 40)}")`);
+          messages.push(`Row ${i + 2}: skipped — no valid channel ref in handle or likeness_match ("${channelId.slice(0, 40)}")`);
           continue;
         }
         if (!query) {
@@ -239,7 +247,7 @@
         const platform = (row.platform || '').toUpperCase();
         if (platform !== 'YOUTUBE') continue;
 
-        const channelId = (row.likeness_match || '').trim();
+        const channelId = channelRefOf(row);
         const query     = (row.client_category_override || '').trim();
         if (!isChannelRef(channelId) || !query) continue;
 

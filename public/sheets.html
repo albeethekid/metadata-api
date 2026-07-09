@@ -56,13 +56,15 @@
       <code id="svc-email">vermillioserviceaccount@vermillio.iam.gserviceaccount.com</code>
     </p>
     <p>The <code>report</code> tab is read from / written to. Columns are matched by header name (column position doesn't matter). These headers are written when present:</p>
-    <pre class="help">Title          ← title (normalized)
+    <pre class="help">title          ← title (normalized)
 content_url    ← heroImageUrl
-likeness_match ← channelHandle   (blank if N/A)
-likeness_label ← durationSeconds (blank if N/A)
-likeness_score ← viewCount
-recommendation ← publishedAt</pre>
-    <p class="muted">Headers missing from your Sheet are skipped silently. Only <code>page_url</code> is required. Rows whose URL can't be processed are <strong>skipped entirely</strong> — nothing is written and existing cell content is preserved.</p>
+handle         ← channelHandle   (blank if N/A)
+duration       ← durationSeconds (blank if N/A)
+view_count     ← viewCount
+published_date ← publishedAt
+like_count     ← likeCount
+comment_count  ← commentCount</pre>
+    <p class="muted">Headers missing from your Sheet are skipped silently. Only <code>page_url</code> is required. Rows where <code>final_relevance</code> is FALSE or <code>final_authorized</code> is TRUE are <strong>skipped</strong> (already triaged). Rows whose URL can't be processed are <strong>skipped entirely</strong> — nothing is written and existing cell content is preserved.</p>
   </details>
 
   <div class="row">
@@ -211,7 +213,7 @@ recommendation ← publishedAt</pre>
     }
 
     function renderPreflightSummary(pf) {
-      const knownHeaders = ['Title','content_url','likeness_match','likeness_label','likeness_score','recommendation'];
+      const knownHeaders = ['title','content_url','handle','duration','view_count','published_date','like_count','comment_count'];
       const present = knownHeaders.filter(h => h in pf.headerIndex);
       const missing = knownHeaders.filter(h => !(h in pf.headerIndex));
       const tasks = buildUniqueTasks(pf.rows);
@@ -219,7 +221,10 @@ recommendation ← publishedAt</pre>
       preflightSummary.style.display = 'block';
       preflightSummary.innerHTML =
         `<div><strong>Spreadsheet:</strong> <code>${pf.spreadsheetId}</code></div>` +
-        `<div><strong>Rows with page_url:</strong> ${pf.rows.length}` +
+        (pf.skippedFiltered
+          ? `<div class="muted"><strong>Rows skipped (final_relevance=FALSE or final_authorized=TRUE):</strong> ${pf.skippedFiltered}</div>`
+          : '') +
+        `<div><strong>Rows to process:</strong> ${pf.rows.length}` +
         (dupeRows > 0
           ? ` <span class="muted">(→ ${tasks.length} unique URLs; ${dupeRows} duplicate row${dupeRows === 1 ? '' : 's'} will reuse the fetched result)</span>`
           : '') +

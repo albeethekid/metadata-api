@@ -21,12 +21,14 @@ const PAGE_URL_HEADER = 'page_url';
 // Header-name based mapping (column position doesn't matter — columns
 // are located by their row-1 header). Missing headers are silently skipped.
 const COLUMN_MAP = [
-  ['Title',          'title'],
+  ['title',          'title'],
   ['content_url',    'heroImageUrl'],
-  ['likeness_match', 'channelHandle'],
-  ['likeness_label', 'durationSeconds'],
-  ['likeness_score', 'viewCount'],
-  ['recommendation', 'publishedAt']
+  ['handle',         'channelHandle'],
+  ['duration',       'durationSeconds'],
+  ['view_count',     'viewCount'],
+  ['published_date', 'publishedAt'],
+  ['like_count',     'likeCount'],
+  ['comment_count',  'commentCount']
 ];
 
 /**
@@ -171,17 +173,32 @@ async function readReportTab(spreadsheetId) {
   }
 
   const pageUrlCol = headerIndex[PAGE_URL_HEADER];
+  const finalRelevanceCol  = headerIndex['final_relevance'];
+  const finalAuthorizedCol = headerIndex['final_authorized'];
   const rows = [];
+  let skippedFiltered = 0;
   for (let i = 1; i < values.length; i++) {
-    const pageUrl = String((values[i] || [])[pageUrlCol] || '').trim();
+    const rowVals = values[i] || [];
+    const pageUrl = String(rowVals[pageUrlCol] || '').trim();
     if (!pageUrl) continue;
+    // Skip rows already triaged: final_relevance=FALSE or final_authorized=TRUE.
+    if (finalRelevanceCol !== undefined &&
+        String(rowVals[finalRelevanceCol] || '').trim().toUpperCase() === 'FALSE') {
+      skippedFiltered++;
+      continue;
+    }
+    if (finalAuthorizedCol !== undefined &&
+        String(rowVals[finalAuthorizedCol] || '').trim().toUpperCase() === 'TRUE') {
+      skippedFiltered++;
+      continue;
+    }
     rows.push({
       rowIndex: i + 1, // 1-based spreadsheet row number (header is row 1)
       pageUrl
     });
   }
 
-  return { spreadsheetId, headers, headerIndex, rows, tabs: tabsMeta };
+  return { spreadsheetId, headers, headerIndex, rows, skippedFiltered, tabs: tabsMeta };
 }
 
 /**
