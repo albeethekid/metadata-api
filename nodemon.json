@@ -1,0 +1,12 @@
+{
+  "watch": ["src", "public"],
+  "ext": "js,mjs,cjs,json,html,css",
+  "ignore": [
+    "data/",
+    "node_modules/",
+    "coverage/",
+    "tests/",
+    "**/*.test.js",
+    "reddit-profile/"
+  ]
+}

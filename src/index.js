@@ -7,14 +7,23 @@ const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp'
 const { scrapeInstagramPost } = require('./instagramScraper');
 const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch, writeCellsByHeader } = require('./sheetsService');
 const { processUrl } = require('./urlProcessor');
+const enrichmentCsv = require('./enrichmentCsv');
+const enrichmentStore = require('./enrichmentStore');
+const enrichmentWorker = require('./enrichmentWorker');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 8080;
 
-app.use(express.json());
+// Enough for a 2 MB upload plus JSON overhead. Kept tight so a stray
+// giant paste can't fill the disk.
+app.use(express.json({ limit: '4mb' }));
 app.use(express.static('public'));
+
+// Rebuild in-flight state on startup: any job left in `running` from a prior
+// process is marked failed so the UI doesn't hang forever.
+enrichmentStore.reconcileOnStartup();
 
 const youtubeClient = new YouTubeClient();
 
@@ -903,6 +912,330 @@ app.post('/api/sheets/process-row', async (req, res) => {
     error: result.ok ? null : result.error,
     message: result.ok ? null : result.message
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Artist Record Enrichment
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Flow:
+//   1. Client POSTs CSV text to /api/enrichment/upload → { jobId, preview }
+//   2. Client POSTs /api/enrichment/:jobId/start → worker begins
+//   3. Client polls /api/enrichment/:jobId + /:jobId/rows for progress
+//   4. Client downloads /api/enrichment/:jobId/export?scope=full|flagged|failed
+//
+// Ownership: no auth in this app. Job IDs are 128-bit random; only someone
+// with the URL can view/download. This matches how other tools in this repo
+// operate (open API + unguessable IDs).
+//
+// Data lives on disk under data/enrichment/{jobId}/. Nothing is stored in a
+// database.
+
+const ENRICHMENT_MAX_ROWS = parseInt(process.env.ENRICHMENT_MAX_ROWS || '500', 10);
+const ENRICHMENT_MAX_BYTES = parseInt(process.env.ENRICHMENT_MAX_BYTES || String(2 * 1024 * 1024), 10);
+const ENRICHMENT_MAX_TITLE_LEN = 500;
+
+// GET /api/enrichment/template.csv → sample template download.
+app.get('/api/enrichment/template.csv', (req, res) => {
+  const csv = enrichmentCsv.sampleTemplateCsv();
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', 'attachment; filename="artist-enrichment-template.csv"');
+  res.send(csv);
+});
+
+// POST /api/enrichment/upload
+//   { csvText, filename? }
+// →  { jobId, filename, totalRows, detectedColumns, missingRequired, unknownColumns,
+//      preview: [first 10 rows], warnings, limits }
+app.post('/api/enrichment/upload', async (req, res) => {
+  try {
+    const { csvText, filename } = req.body || {};
+    if (typeof csvText !== 'string' || !csvText.length) {
+      return res.status(400).json({ error: 'MISSING_CSV', message: 'csvText is required.' });
+    }
+    // Byte-size guard (UTF-8).
+    const bytes = Buffer.byteLength(csvText, 'utf8');
+    if (bytes > ENRICHMENT_MAX_BYTES) {
+      return res.status(413).json({
+        error: 'FILE_TOO_LARGE',
+        message: `CSV exceeds the ${(ENRICHMENT_MAX_BYTES / (1024 * 1024)).toFixed(1)} MB limit (${(bytes / (1024 * 1024)).toFixed(2)} MB uploaded).`
+      });
+    }
+    // Filename hygiene.
+    const safeName = (filename || 'upload.csv')
+      .toString()
+      .replace(/[^\w.\- ]+/g, '_')
+      .slice(0, 120);
+    if (!/\.csv$/i.test(safeName)) {
+      return res.status(400).json({
+        error: 'INVALID_EXTENSION',
+        message: 'Only .csv files are accepted.'
+      });
+    }
+
+    let parsed;
+    try {
+      parsed = enrichmentCsv.parseCsv(csvText);
+    } catch (e) {
+      return res.status(400).json({ error: 'MALFORMED_CSV', message: e.message });
+    }
+    const validation = enrichmentCsv.validateHeaders(parsed.headers);
+    if (validation.missingRequired.length > 0) {
+      return res.status(400).json({
+        error: 'MISSING_REQUIRED_COLUMNS',
+        message: `Missing required columns: ${validation.missingRequired.join(', ')}`,
+        missingRequired: validation.missingRequired,
+        detectedColumns: parsed.headers
+      });
+    }
+    if (parsed.rows.length === 0) {
+      return res.status(400).json({ error: 'EMPTY_CSV', message: 'CSV has no data rows.' });
+    }
+    if (parsed.rows.length > ENRICHMENT_MAX_ROWS) {
+      return res.status(413).json({
+        error: 'TOO_MANY_ROWS',
+        message: `CSV has ${parsed.rows.length} rows; the current limit is ${ENRICHMENT_MAX_ROWS}.`
+      });
+    }
+    // Trim absurd Title Override values.
+    for (const r of parsed.rows) {
+      if (r['Title Override'] && r['Title Override'].length > ENRICHMENT_MAX_TITLE_LEN) {
+        r['Title Override'] = r['Title Override'].slice(0, ENRICHMENT_MAX_TITLE_LEN);
+      }
+    }
+
+    const job = await enrichmentStore.createJob({
+      filename: safeName,
+      originalCsv: csvText,
+      detectedColumns: parsed.headers,
+      missingRequired: validation.missingRequired,
+      rows: parsed.rows,
+      limits: {
+        maxRows: ENRICHMENT_MAX_ROWS,
+        maxBytes: ENRICHMENT_MAX_BYTES
+      }
+    });
+
+    return res.json({
+      jobId: job.id,
+      filename: job.filename,
+      totalRows: job.totalRows,
+      detectedColumns: parsed.headers,
+      missingRequired: validation.missingRequired,
+      unknownColumns: validation.unknownColumns,
+      preview: parsed.rows.slice(0, 10),
+      limits: job.limits,
+      warnings: validation.unknownColumns.length
+        ? [`Ignoring unknown columns: ${validation.unknownColumns.join(', ')}`]
+        : []
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'UPLOAD_FAILED', message: e.message });
+  }
+});
+
+// GET /api/enrichment  → list all jobs (most recent first)
+app.get('/api/enrichment', (req, res) => {
+  const jobs = enrichmentStore.listJobs().map(j => ({
+    id: j.id,
+    filename: j.filename,
+    status: j.status,
+    totalRows: j.totalRows,
+    completedRows: j.completedRows,
+    flaggedRows: j.flaggedRows,
+    failedRows: j.failedRows,
+    createdAt: j.createdAt,
+    completedAt: j.completedAt
+  }));
+  return res.json({ jobs });
+});
+
+// GET /api/enrichment/:jobId  → job metadata + progress
+app.get('/api/enrichment/:jobId', (req, res) => {
+  const job = enrichmentStore.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+  return res.json({
+    ...job,
+    active: enrichmentWorker.isJobActive(job.id)
+  });
+});
+
+// GET /api/enrichment/:jobId/rows?filter=all|enriched|flagged|needs_review|failed&search=...
+// →  { rows: [...] }  (each row already contains original + enriched)
+app.get('/api/enrichment/:jobId/rows', (req, res) => {
+  const job = enrichmentStore.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+
+  const filter = (req.query.filter || 'all').toString();
+  const search = (req.query.search || '').toString().trim().toLowerCase();
+
+  let rows = enrichmentStore.listRows(job.id);
+  if (filter === 'enriched') {
+    rows = rows.filter(r => r.status === 'enriched' || r.status === 'enriched_with_flags');
+  } else if (filter === 'flagged') {
+    rows = rows.filter(r => r.status === 'enriched_with_flags' || r.status === 'needs_review');
+  } else if (filter === 'needs_review') {
+    rows = rows.filter(r => r.status === 'needs_review');
+  } else if (filter === 'failed') {
+    rows = rows.filter(r => r.status === 'failed');
+  }
+  if (search) {
+    rows = rows.filter(r => {
+      const o = r.original || {};
+      const e = (r.enriched && r.enriched.row) || {};
+      const hay = [
+        o['Title Override'], o.full_name, o.stage_name, o.organization,
+        e['Title Override'], e.full_name, e.stage_name, e.organization
+      ].map(v => (v || '').toString().toLowerCase()).join('\n');
+      return hay.includes(search);
+    });
+  }
+  return res.json({ rows, total: rows.length });
+});
+
+// GET /api/enrichment/:jobId/rows/:rowIndex  → single row + sources
+app.get('/api/enrichment/:jobId/rows/:rowIndex', (req, res) => {
+  const job = enrichmentStore.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+  const idx = parseInt(req.params.rowIndex, 10);
+  const row = enrichmentStore.getRow(job.id, idx);
+  if (!row) return res.status(404).json({ error: 'ROW_NOT_FOUND' });
+  const sources = enrichmentStore.listSources(job.id, idx);
+  return res.json({ row, sources });
+});
+
+// POST /api/enrichment/:jobId/start
+//   { concurrency?, maxSerpPerRow?, model? }
+// →  { started: true, status }
+app.post('/api/enrichment/:jobId/start', async (req, res) => {
+  const job = enrichmentStore.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+  if (!process.env.SERPER_API_KEY) {
+    return res.status(500).json({ error: 'MISSING_SERPER_KEY', message: 'SERPER_API_KEY is not set on the server.' });
+  }
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: 'MISSING_ANTHROPIC_KEY', message: 'ANTHROPIC_API_KEY is not set on the server.' });
+  }
+  if (enrichmentWorker.isJobActive(job.id)) {
+    return res.status(409).json({ error: 'ALREADY_RUNNING', message: 'Job is already running.' });
+  }
+  if (job.status === 'completed' || job.status === 'cancelled') {
+    return res.status(409).json({ error: 'JOB_TERMINAL', message: 'Job already finished; use /retry to re-run failed rows.' });
+  }
+
+  const opts = {};
+  if (req.body && Number.isFinite(req.body.concurrency)) opts.concurrency = req.body.concurrency;
+  if (req.body && Number.isFinite(req.body.maxSerpPerRow)) opts.maxSerpPerRow = req.body.maxSerpPerRow;
+  if (req.body && typeof req.body.model === 'string' && req.body.model) opts.model = req.body.model;
+
+  // Fire-and-forget; the client polls for progress. Errors are captured in
+  // the job.error field by the worker.
+  enrichmentWorker.runJob(job.id, opts).catch(err => {
+    console.error(`[enrichment] job ${job.id} failed:`, err && err.message);
+  });
+  const now = enrichmentStore.getJob(job.id);
+  return res.json({ started: true, status: now.status });
+});
+
+// POST /api/enrichment/:jobId/cancel  → cooperatively stops processing
+app.post('/api/enrichment/:jobId/cancel', async (req, res) => {
+  const job = enrichmentStore.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+  await enrichmentStore.updateJob(job.id, { cancelRequested: true });
+  return res.json({ cancelRequested: true });
+});
+
+// POST /api/enrichment/:jobId/retry
+//   { scope: 'failed' | 'flagged' | 'all' | 'rows', rowIndexes?: number[] }
+// Re-runs the specified subset. Retries are additive — the worker only
+// overwrites successful data if the new run succeeds.
+app.post('/api/enrichment/:jobId/retry', async (req, res) => {
+  const job = enrichmentStore.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+  if (enrichmentWorker.isJobActive(job.id)) {
+    return res.status(409).json({ error: 'ALREADY_RUNNING' });
+  }
+  const scope = (req.body && req.body.scope) || 'failed';
+  const rows = enrichmentStore.listRows(job.id);
+  let targets;
+  if (scope === 'rows' && Array.isArray(req.body.rowIndexes)) {
+    targets = req.body.rowIndexes;
+  } else if (scope === 'flagged') {
+    targets = rows.filter(r => r.status === 'enriched_with_flags' || r.status === 'needs_review').map(r => r.rowIndex);
+  } else if (scope === 'all') {
+    targets = rows.map(r => r.rowIndex);
+  } else {
+    targets = rows.filter(r => r.status === 'failed').map(r => r.rowIndex);
+  }
+  if (targets.length === 0) {
+    return res.json({ started: false, message: 'No rows match the retry scope.' });
+  }
+  // Reset those rows to `pending` so counters bump correctly on completion.
+  for (const idx of targets) {
+    await enrichmentStore.updateRow(job.id, idx, { status: 'pending', error: null });
+  }
+  // Don't double-count on retries — subtract those from the aggregate counters.
+  const cur = enrichmentStore.getJob(job.id);
+  const rowMap = new Map(rows.map(r => [r.rowIndex, r]));
+  let failedDelta = 0, flaggedDelta = 0, completedDelta = 0;
+  for (const idx of targets) {
+    const r = rowMap.get(idx);
+    if (!r) continue;
+    if (r.status === 'failed') failedDelta++;
+    if (r.status === 'enriched_with_flags' || r.status === 'needs_review') flaggedDelta++;
+    if (r.status !== 'pending' && r.status !== 'processing') completedDelta++;
+  }
+  await enrichmentStore.updateJob(job.id, {
+    failedRows: Math.max(0, (cur.failedRows || 0) - failedDelta),
+    flaggedRows: Math.max(0, (cur.flaggedRows || 0) - flaggedDelta),
+    completedRows: Math.max(0, (cur.completedRows || 0) - completedDelta),
+    status: 'pending',
+    completedAt: null,
+    error: null
+  });
+
+  enrichmentWorker.runJob(job.id, { retryRowIndexes: targets }).catch(err => {
+    console.error(`[enrichment] job ${job.id} retry failed:`, err && err.message);
+  });
+  return res.json({ started: true, count: targets.length });
+});
+
+// GET /api/enrichment/:jobId/export?scope=full|flagged|failed|review
+// → text/csv download
+app.get('/api/enrichment/:jobId/export', (req, res) => {
+  const job = enrichmentStore.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+  const scope = (req.query.scope || 'full').toString();
+  const rows = enrichmentStore.listRows(job.id);
+
+  let selected;
+  if (scope === 'flagged') {
+    selected = rows.filter(r => r.status === 'enriched_with_flags' || r.status === 'needs_review');
+  } else if (scope === 'failed') {
+    selected = rows.filter(r => r.status === 'failed');
+  } else {
+    selected = rows;
+  }
+
+  const columns = enrichmentCsv.FULL_EXPORT_COLUMNS;
+  const csvRows = selected.map(r => {
+    const base = (r.enriched && r.enriched.row) || r.original || {};
+    const row = {};
+    for (const col of enrichmentCsv.INPUT_COLUMNS) row[col] = base[col] || '';
+    row.enrichment_status = r.status || '';
+    row.title_quality_status = r.title_quality_status || '';
+    row.flag_reason = r.flag_reason || '';
+    row.entity_type = r.entity_type || '';
+    row.confidence = r.confidence != null ? r.confidence.toFixed(2) : '';
+    const sources = enrichmentStore.listSources(job.id, r.rowIndex);
+    row.source_urls = enrichmentCsv.joinList(sources.map(s => s.url).filter(Boolean));
+    return row;
+  });
+  const csv = enrichmentCsv.buildCsv(columns, csvRows);
+  const filename = `enriched-${scope}-${job.id.slice(0, 8)}.csv`;
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${filename}"`);
+  return res.send(csv);
 });
 
 // curl "http://localhost:3000/api/tiktok/video/metrics?url=https%3A%2F%2Fwww.tiktok.com%2F%40yaroslavslonsky%2Fvideo%2F7568246874558237965"
@@ -2474,6 +2807,7 @@ const indexData = {
   uiTools: [
     { path: '/csv.html',                name: 'CSV Generator',       desc: 'Batch process URLs and download CSV' },
     { path: '/sheets.html',             name: 'Vermillio Report Augmentation', desc: 'Process URLs from a Google Sheet `report` tab and write metadata back' },
+    { path: '/enrichment.html',         name: 'Artist Record Enrichment', desc: 'Upload a CSV of artist records; enrich identity, socials, works & affiliations' },
     { path: '/channels.html',           name: 'Channel Search',      desc: 'YouTube channel search CSV export' },
     { path: '/screenshot.html',         name: 'Screenshot Tool',     desc: 'Take screenshots and get public URLs or download CSV' },
     { path: '/discover-siblings.html',  name: 'Sibling Discovery',   desc: 'Upload SERP CSV to find related videos on the same channel' }

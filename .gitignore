@@ -103,3 +103,6 @@ Thumbs.db
 
 # yt-dlp binary
 bin/
+
+# Artist Record Enrichment job store (per-instance data)
+data/enrichment/
