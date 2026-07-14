@@ -2807,7 +2807,7 @@ const indexData = {
   uiTools: [
     { path: '/csv.html',                name: 'CSV Generator',       desc: 'Batch process URLs and download CSV' },
     { path: '/sheets.html',             name: 'Vermillio Report Augmentation', desc: 'Process URLs from a Google Sheet `report` tab and write metadata back' },
-    { path: '/enrichment.html',         name: 'Artist Record Enrichment', desc: 'Upload a CSV of artist records; enrich identity, socials, works & affiliations' },
+    { path: '/enrichment.html',         name: 'Artist Record Enrichment', desc: 'Upload a CSV keyed on Title Override; SERP + Claude resolve identity, official socials, produced works and affiliations. Generic/ambiguous names are flagged for review.' },
     { path: '/channels.html',           name: 'Channel Search',      desc: 'YouTube channel search CSV export' },
     { path: '/screenshot.html',         name: 'Screenshot Tool',     desc: 'Take screenshots and get public URLs or download CSV' },
     { path: '/discover-siblings.html',  name: 'Sibling Discovery',   desc: 'Upload SERP CSV to find related videos on the same channel' }
@@ -2862,6 +2862,23 @@ const indexData = {
           example: '/api/chartmetric/metadata?url=https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp' },
         { path: '/api/spotify/metadata?url=<SPOTIFY_URL>&verbose=1', desc: 'Spotify shows / episodes',
           example: '/api/spotify/metadata?url=https://open.spotify.com/episode/0L5BZId2ySpX6Ni64dbbhw' }
+      ]
+    },
+    {
+      name: 'Artist Enrichment',
+      endpoints: [
+        { path: '/api/enrichment/template.csv', desc: 'Download the blank CSV template with the canonical column order',
+          example: '/api/enrichment/template.csv' },
+        { path: 'POST /api/enrichment/upload', desc: 'Body: { csvText, filename? }. Validates + creates a job, returns jobId + preview' },
+        { path: 'GET /api/enrichment', desc: 'List all enrichment jobs (most recent first)',
+          example: '/api/enrichment' },
+        { path: 'GET /api/enrichment/:jobId', desc: 'Job metadata + progress counters' },
+        { path: 'GET /api/enrichment/:jobId/rows?filter=all|enriched|flagged|needs_review|failed&search=<term>', desc: 'Per-row status with original + enriched fields' },
+        { path: 'GET /api/enrichment/:jobId/rows/:rowIndex', desc: 'Single row detail plus its evidence sources' },
+        { path: 'POST /api/enrichment/:jobId/start', desc: 'Body: { concurrency?, maxSerpPerRow?, model? }. Kicks off the worker' },
+        { path: 'POST /api/enrichment/:jobId/cancel', desc: 'Cooperative cancel — worker stops between rows' },
+        { path: 'POST /api/enrichment/:jobId/retry', desc: 'Body: { scope: failed|flagged|all|rows, rowIndexes?: [] }. Re-runs a subset' },
+        { path: 'GET /api/enrichment/:jobId/export?scope=full|flagged|failed', desc: 'Download an enriched CSV in canonical column order' }
       ]
     },
     {

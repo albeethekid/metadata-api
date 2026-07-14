@@ -29,6 +29,16 @@ Search YouTube videos.
 
 - Returns the raw-ish response from the internal YouTube client.
 
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis` (`src/youtubeClient.js#searchVideos`).
+
+| Call | Parts | Quota units |
+|---|---|---|
+| `youtube.search.list` (type=video, order=relevance) | `snippet` | **100 per request** |
+
+Total quota cost: **100 units per request**. Uses `YOUTUBE_API_KEY` / `YOUTUBE_API_KEYS` with automatic key rotation on daily-quota exhaustion.
+
 ### Errors
 
 - `400` if `q` is missing
@@ -56,6 +66,17 @@ An array of normalized channel objects:
 - `description`
 - `subscriberCount`
 - `videoCount`
+
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis` (`src/youtubeClient.js#searchChannels`).
+
+| Call | Parts | Quota units |
+|---|---|---|
+| `youtube.search.list` (type=channel, order=relevance) | `snippet` | **100** |
+| `youtube.channels.list` (batched IDs from search results) | `statistics, snippet` | 1 |
+
+Total quota cost: **~101 units per request** (channels.list is skipped if the search returned no results).
 
 ### Errors
 
@@ -88,6 +109,17 @@ Compact payload including:
 - `heroImageUrl`
 - `channelHandle`
 
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis` (`src/youtubeClient.js#getVideoDetails`).
+
+| Call | Parts | Quota units |
+|---|---|---|
+| `youtube.videos.list` | `snippet, statistics, contentDetails` | 1 |
+| `youtube.channels.list` (for the video's channel handle) | `snippet` | 1 |
+
+Total quota cost: **2 units per request**. Channel lookup failures are non-fatal — the endpoint still returns the video with `channel.handle: null`.
+
 ---
 
 ## `GET /api/channel/:channelId`
@@ -97,6 +129,16 @@ Fetch YouTube channel details.
 ### Path params
 
 - `channelId` (required)
+
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis` (`src/youtubeClient.js#getChannelDetails`).
+
+| Call | Parts | Quota units |
+|---|---|---|
+| `youtube.channels.list` | `snippet, statistics, brandingSettings` | 1 |
+
+Total quota cost: **1 unit per request**.
 
 ---
 
@@ -111,6 +153,16 @@ Fetch recent videos for a YouTube channel.
 ### Query params
 
 - `maxResults` (optional, default `10`)
+
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis` (`src/youtubeClient.js#getChannelVideos`).
+
+| Call | Parts | Quota units |
+|---|---|---|
+| `youtube.search.list` (channelId filter, order=date) | `snippet` | **100** |
+
+Total quota cost: **100 units per request**. `search.list` is used rather than `playlistItems.list` here because the caller wants "recent" ordering across the whole channel (not just uploads), which requires the search index.
 
 ---
 
@@ -175,6 +227,20 @@ Only videos with `score > 0` are returned, sorted by score descending.
 }
 ```
 
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis`. This endpoint is intentionally
+built on cheap 1-unit calls to avoid the expensive `search.list` cost.
+
+| Call | Parts | Quota units | Notes |
+|---|---|---|---|
+| `youtube.channels.list` (`src/youtubeClient.js#getChannelContentDetails`) | `snippet, contentDetails` | 1 | Uses `forHandle` when `channelId` starts with `@`, otherwise `id`. Returns the channel's `contentDetails.relatedPlaylists.uploads` playlist ID. |
+| `youtube.playlistItems.list` (`#getPlaylistItemsAll`, paginated) | `snippet` | 1 per page | Fetches up to 50 items per page. For `maxResults=100` that's 2 pages = **2 units**; `maxResults=300` = 6 pages = **6 units**. |
+
+**Typical quota cost**: **3 units** for the default `maxResults=100` scan (1 for channels.list + 2 for two pages of playlistItems.list). Compare with `/api/search?channelId=...` which would cost 100 units for the same scan.
+
+**No calls to** `videos.list` — scoring is performed entirely against the snippet/thumbnails data returned by `playlistItems.list`, which is sufficient for the title/description overlap heuristics.
+
 ### Errors
 
 - `400` if `channelId` or `query` is missing
@@ -227,6 +293,11 @@ Fetch the public transcript/captions for a YouTube video for downstream analysis
 | `404` | Transcript disabled, missing, empty, or video unavailable |
 | `502` | Upstream fetch/parse failure (YouTube watch page or transcript URL) |
 
+### Upstream calls
+
+- **`yt-dlp`** (invoked via `yt-dlp-wrap`) — makes two subprocess calls: one to list available caption tracks, one to download the chosen track in `json3` format. **No YouTube Data API quota is consumed** — this endpoint hits YouTube's public watch page and captions endpoints via yt-dlp.
+- **Oxylabs residential proxy** — both yt-dlp calls are routed through the proxy by default when `OXYLABS_*` credentials are set (bypass with `proxy=0`).
+
 ---
 
 ## `GET /api/video/:videoId/comments`
@@ -241,6 +312,16 @@ Fetch comments for a YouTube video.
 
 - `maxResults` (optional, default `20`)
 
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis` (`src/youtubeClient.js#getVideoComments`).
+
+| Call | Parts | Quota units |
+|---|---|---|
+| `youtube.commentThreads.list` (order=relevance) | `snippet` | 1 |
+
+Total quota cost: **1 unit per request**. Note: only top-level comment threads are returned — replies are not fetched.
+
 ---
 
 ## `GET /api/trending`
@@ -251,6 +332,16 @@ Fetch trending YouTube videos.
 
 - `regionCode` (optional, default `US`)
 - `maxResults` (optional, default `10`)
+
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis` (`src/youtubeClient.js#getTrendingVideos`).
+
+| Call | Parts | Quota units |
+|---|---|---|
+| `youtube.videos.list` (chart=mostPopular) | `snippet, statistics` | 1 |
+
+Total quota cost: **1 unit per request**.
 
 ---
 
@@ -265,6 +356,16 @@ Fetch playlist items.
 ### Query params
 
 - `maxResults` (optional, default `50`)
+
+### Upstream calls
+
+**YouTube Data API v3** via `googleapis` (`src/youtubeClient.js#getPlaylistItems`).
+
+| Call | Parts | Quota units |
+|---|---|---|
+| `youtube.playlistItems.list` | `snippet` | 1 |
+
+Total quota cost: **1 unit per request** (single non-paginated call — for paginated fetches see `#getPlaylistItemsAll`, used by `/api/youtube/discover-siblings`).
 
 ---
 
@@ -282,6 +383,15 @@ Fetch TikTok video metrics by scraping/parsing.
 - `proxy` (optional):
   - omitted: default behavior (proxy used if configured)
   - `proxy=0` or `proxy=false`: disable proxy
+
+### Upstream calls
+
+**No third-party API.** This endpoint fetches the TikTok video's public HTML
+page directly (`src/tiktokMetrics.js`), parses the embedded `SIGI_STATE` /
+`__UNIVERSAL_DATA_FOR_REHYDRATION__` JSON blob, and extracts metrics from it.
+
+- **Oxylabs residential proxy** is used by default when configured; disable
+  with `proxy=0`.
 
 ### Errors
 
@@ -303,6 +413,14 @@ Fetch TikTok video metadata via `yt-dlp`.
 ### Notes
 
 - This endpoint uses `yt-dlp-wrap` and may be unsuitable for some serverless environments.
+
+### Upstream calls
+
+- **`yt-dlp`** subprocess invocation via `yt-dlp-wrap` (`src/tiktokYtdlp.js`).
+  Single call to yt-dlp with `--dump-single-json` to extract the full metadata
+  envelope (video info, author, stats, formats, music).
+- **Oxylabs residential proxy** used by default; disable with `proxy=0`.
+- **No third-party API keys required** for this endpoint.
 
 ---
 
@@ -342,6 +460,12 @@ An array of normalized profile objects:
 - `subscriberCount`
 - `videoCount`
 
+### Upstream calls
+
+- **EnsembleData API** — `GET https://ensembledata.com/apis/tt/user/search` with `name=<query>&cursor=<cursor>`. Returns candidate TikTok users; the endpoint may make multiple calls to fill `maxResults`. Auth: `ENSEMBLE_DATA_API_KEY`.
+- **Internal `/api/screenshot`** (default: on) — one call per profile in screenshot-thumbnail mode, hitting `https://www.tiktok.com/@<handle>/` with `meta=1&storage_provider=cloudflare`. Each nested call transitively invokes Playwright and Cloudflare R2 upload.
+- **Cloudflare R2** (transitively via `/api/screenshot`) — one `PutObject` per profile thumbnail.
+
 ### Errors
 
 - `400` if `query` is missing
@@ -370,6 +494,12 @@ Scrape Instagram post/reel/tv metrics.
 
 - Returns JSON by default.
 - If `debug=1` and the request `Accept` header includes `text/html`, the endpoint returns an HTML debug page that includes captured screenshots and raw JSON.
+
+### Upstream calls
+
+- **Playwright** — headless Chromium navigates to the Instagram URL and reads the `sharedData` blob / GraphQL response embedded in the page (`src/instagramScraper.js`).
+- **Oxylabs residential proxy** — Playwright is launched with the proxy when credentials exist; disable via `proxy=0`.
+- **No Instagram-facing API key** — this is a plain page scrape, so login walls and IP-based rate limiting are the primary failure modes.
 
 ### Errors
 
@@ -411,6 +541,14 @@ Same shape as `/api/instagram/video`:
 - `metrics`: { `views`, `likes`, `comments`, `shares` }
 - `apifyData` (only if `verbose=1`): full Apify post object
 
+### Upstream calls
+
+- **Apify Platform API** — starts a synchronous run of the `apify/instagram-scraper` actor with `directUrls=[<url>]`, waits for completion, then fetches the actor's default dataset. Sequence:
+  - `POST https://api.apify.com/v2/acts/apify~instagram-scraper/runs` (start)
+  - `GET  https://api.apify.com/v2/actor-runs/<runId>` (poll until finished)
+  - `GET  https://api.apify.com/v2/datasets/<defaultDatasetId>/items` (fetch)
+  - Auth: `APIFY_API_KEY`. Actor billing: consumes Apify compute units per run.
+
 ### Errors
 
 - `400` if `url` is missing or invalid
@@ -448,6 +586,15 @@ An array of normalized profile objects:
 - `subscriberCount`
 - `videoCount`
 
+### Upstream calls
+
+- **EnsembleData API** — `GET https://ensembledata.com/apis/instagram/search?text=<query>` for candidate handle discovery. Auth: `ENSEMBLE_DATA_API_KEY`.
+- **Apify Platform API** — starts the `apify/instagram-profile-scraper` actor with the discovered usernames, waits for completion, and reads the dataset items:
+  - `POST https://api.apify.com/v2/acts/apify~instagram-profile-scraper/runs`
+  - `GET  https://api.apify.com/v2/actor-runs/<runId>` (poll)
+  - `GET  https://api.apify.com/v2/datasets/<defaultDatasetId>/items`
+  - Auth: `APIFY_API_KEY`.
+
 ### Errors
 
 - `400` if `query` is missing
@@ -484,6 +631,14 @@ An array of normalized profile objects:
 - `description`
 - `subscriberCount`
 - `videoCount`
+
+### Upstream calls
+
+- **Apify Platform API** — runs the `watcher.data/search-x-by-keywords` actor with `keywords=[query]&searchType=users`. Same sync-run-and-fetch flow as the Instagram Apify endpoints:
+  - `POST https://api.apify.com/v2/acts/watcher.data~search-x-by-keywords/runs`
+  - `GET  https://api.apify.com/v2/actor-runs/<runId>` (poll)
+  - `GET  https://api.apify.com/v2/datasets/<defaultDatasetId>/items`
+  - Auth: `APIFY_API_KEY`.
 
 ### Errors
 
@@ -526,6 +681,13 @@ Render a web page in Playwright and return either an image response or a metadat
 - `meta=1`: JSON metadata including `status`, `warnings`, `pageSignals`, and (when `storage_provider=cloudflare`) `s3_url`
 - default: image bytes (`image/jpeg`, `image/png`, or `image/webp`)
 
+### Upstream calls
+
+- **Playwright / Chromium** — launches a headless browser, navigates to the target URL, captures the screenshot buffer.
+- **Oxylabs residential proxy** — Playwright is launched through the proxy by default when credentials exist; disable with `proxy=0`.
+- **Cloudflare R2** (only when `storage_provider=cloudflare`) — one `PutObject` via the AWS S3-compatible SDK (`src/r2-storage.js`) to the bucket named by `R2_BUCKET`, using `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` for auth. The public URL is derived from `R2_PUBLIC_BASE_URL`.
+- **No third-party APIs** are called when `storage_provider` is omitted — the image is returned directly to the client.
+
 ---
 
 # Proxy Debug
@@ -565,6 +727,23 @@ Fetch metadata for Spotify URLs using the Spotify Web API.
 
 - Supports some `creators.spotify.com` URLs via an HTML resolver.
 
+### Upstream calls
+
+**Spotify Web API** (`src/spotify.js`). All calls are authenticated with a
+client-credentials bearer token cached in-process until expiry.
+
+| Call | Purpose |
+|---|---|
+| `POST https://accounts.spotify.com/api/token` (grant=client_credentials) | Fetches a bearer token; result is cached in memory until near expiry. |
+| `GET  https://api.spotify.com/v1/tracks/{id}` | Track URLs |
+| `GET  https://api.spotify.com/v1/albums/{id}` | Album URLs |
+| `GET  https://api.spotify.com/v1/artists/{id}` | Artist URLs |
+| `GET  https://api.spotify.com/v1/playlists/{id}` | Playlist URLs |
+| `GET  https://api.spotify.com/v1/shows/{id}` | Show URLs |
+| `GET  https://api.spotify.com/v1/episodes/{id}` | Episode URLs |
+
+Exactly **one** metadata call is made per request (the token exchange only runs when the cached token is missing/expired). Auth: `SPOTIFY_CLIENT_ID` + `SPOTIFY_SECRET`.
+
 ### Errors
 
 - `400` `unsupported_spotify_url` when URL type is unsupported
@@ -586,6 +765,26 @@ Fetch enriched metadata (including streaming-related stats) for Spotify items vi
 ### Notes
 
 - Chartmetric is used for tracks/albums/artists/playlists. Spotify shows/episodes are handled via `/api/spotify/metadata`.
+
+### Upstream calls
+
+**Chartmetric API** (`src/chartmetric.js`). Auth: refresh-token exchange
+producing a bearer token cached in-process.
+
+| Call | Purpose |
+|---|---|
+| `POST https://api.chartmetric.com/api/token` (`refreshtoken`) | Bearer token exchange; result is cached in memory until near expiry. |
+
+Then, per item type, Chartmetric requires a **two-step resolve** (Spotify ID → Chartmetric ID → entity), so each URL type costs **2 GET calls** (or 3 for playlists which use `/search`):
+
+| Spotify item type | Calls |
+|---|---|
+| Track  | `GET /track/spotify/{spotifyId}/get-ids` → `GET /track/{cmId}` |
+| Album  | `GET /album/spotify/{spotifyId}/get-ids` → `GET /album/{cmId}` |
+| Artist | `GET /artist/spotify/{spotifyId}/get-ids` → `GET /artist/{cmId}` |
+| Playlist | `GET /search?q=spotify:playlist:{id}&type=playlists` → `GET /playlist/spotify/{cmId}` |
+
+**Typical cost**: **2 API calls per request** (3 for playlists), plus a token exchange the first time.
 
 ---
 
@@ -691,6 +890,22 @@ The Sheets Processor UI is a thin client over these routes. They are also docume
 | `POST /api/sheets/ask` | Claude Q&A over the sheet contents, with optional tool-use writeback |
 | `POST /api/sheets/process-row` | Legacy single-shot fetch+write per row (kept for ad-hoc / scripted use) |
 
+### Upstream calls
+
+**Google Sheets API v4** (via `googleapis`, `src/sheetsService.js`) — authenticated with a service-account JSON key.
+
+| Endpoint | Sheets API calls |
+|---|---|
+| `POST /api/sheets/preflight` | `spreadsheets.get` + `spreadsheets.values.get` (report tab range) |
+| `POST /api/sheets/fetch-row` | None — pure metadata fetch via `processUrl`; no Sheet I/O |
+| `POST /api/sheets/write-rows` | One `spreadsheets.values.batchUpdate` regardless of row count |
+| `POST /api/sheets/ask` | `spreadsheets.values.get` per included tab (report + optional extras). If `writeBack=true`, each `update_report_cells` tool call issues an additional `spreadsheets.values.batchUpdate`. |
+| `POST /api/sheets/process-row` | `spreadsheets.values.get` (or cached headerIndex) + `spreadsheets.values.batchUpdate` on success |
+
+**Anthropic Messages API** (only for `/api/sheets/ask`) — `POST https://api.anthropic.com/v1/messages`, up to 8 iterations per request (agentic tool-use loop). Model: `claude-sonnet-4-5`. Auth: `ANTHROPIC_API_KEY`.
+
+**Downstream metadata fetches** — `/api/sheets/fetch-row` and `/api/sheets/process-row` route the row's `page_url` through `src/urlProcessor.js`, which in turn calls the platform-specific endpoints documented above (`/api/video/:id`, `/api/tiktok/*`, `/api/instagram/*`, `/api/chartmetric/metadata`, `/api/spotify/metadata`, `/api/screenshot`, etc.). Upstream costs cascade accordingly.
+
 ### Implementation notes
 
 - **Header-name-only writes.** The writer never assumes column positions. It builds `A1` ranges from `headerIndex[headerName]` at request time, so reordering columns in the Sheet does not break the integration.
@@ -789,6 +1004,223 @@ Paste one or more URLs into the textarea and capture Cloudflare R2-hosted screen
 
 ---
 
+# Artist Record Enrichment
+
+Upload a CSV of artist / rights-holder records keyed on `Title Override`. The
+service assesses whether each title is specific enough to identify an entity,
+runs targeted Serper.dev searches, and asks Claude via a strict tool-use
+schema to resolve identity, official properties, produced works, and media
+affiliations. Ambiguous or generic titles are flagged for review rather than
+enriched blindly.
+
+- **UI**: `/enrichment.html`
+- **Source**: `src/enrichmentWorker.js`, `src/enrichmentStore.js`, `src/enrichmentCsv.js`, `src/serpClient.js`, `public/enrichment.html`
+- **Persistence**: file-based JSON under `data/enrichment/{jobId}/` (no database)
+- **Required env**: `SERPER_API_KEY`, `ANTHROPIC_API_KEY`
+- **Optional env**: `ENRICHMENT_CONCURRENCY` (default 3), `ENRICHMENT_MAX_ROWS` (500), `ENRICHMENT_MAX_BYTES` (2 MB), `ENRICHMENT_MAX_SERP_PER_ROW` (5), `ENRICHMENT_LLM_MODEL` (`claude-sonnet-4-5`), `ENRICHMENT_LLM_TIMEOUT_MS` (60000), `ENRICHMENT_DATA_DIR`
+
+## Input schema
+
+The uploaded CSV must include the following columns (exact names, exact order
+in the exported CSV). Only `email` and `Title Override` are hard-required; the
+other columns are preserved verbatim and populated where possible.
+
+```
+email, first_name, last_name, full_name, stage_name, Title Override, Country,
+profession_of_artist, organization, produced_works, tiktok_url, instagram_url,
+x_url, youtube_url, facebook_url, official_store_url, official_site_url,
+media_affiliations, query_override
+```
+
+- `Country` is written as an **ISO 3166-1 alpha-2** code (e.g. `US`, `GB`, `KR`).
+- List fields (`produced_works`, `media_affiliations`, exported `source_urls`)
+  are **comma-delimited** (`"Fire for You, Hurricane, Bad Dream"`).
+- `query_override` is **user-only** — the model never populates it. User-
+  supplied values are preserved verbatim.
+
+## Export schema
+
+Full-export CSVs append the following review columns **after** the input
+columns (never interleaved):
+
+```
+enrichment_status, title_quality_status, flag_reason, entity_type,
+confidence, source_urls
+```
+
+CSV cells beginning with `= + - @ \t \r` are prefixed with a single quote at
+export time to neutralize spreadsheet formula injection.
+
+## `GET /api/enrichment/template.csv`
+
+Downloads the blank template with the canonical column order and three sample
+`Title Override` values (Central Cee, Michelle Joy (Cannons), Cannons).
+
+## `POST /api/enrichment/upload`
+
+Creates a new enrichment job from the uploaded CSV text.
+
+### Body
+
+```json
+{ "csvText": "<CSV file contents as string>", "filename": "artists.csv" }
+```
+
+### Response
+
+```json
+{
+  "jobId": "6dcc8dbb...",
+  "filename": "artists.csv",
+  "totalRows": 12,
+  "detectedColumns": ["email", "Title Override", ...],
+  "missingRequired": [],
+  "unknownColumns": [],
+  "preview": [ /* first 10 rows */ ],
+  "limits": { "maxRows": 500, "maxBytes": 2097152 },
+  "warnings": []
+}
+```
+
+### Errors
+
+| Status | Error code | Meaning |
+|---|---|---|
+| 400 | `MISSING_CSV` | `csvText` was missing or empty. |
+| 400 | `INVALID_EXTENSION` | `filename` did not end in `.csv`. |
+| 400 | `MALFORMED_CSV` | Parser failed on the file. |
+| 400 | `MISSING_REQUIRED_COLUMNS` | `email` or `Title Override` missing. |
+| 400 | `EMPTY_CSV` | Header present but zero data rows. |
+| 413 | `FILE_TOO_LARGE` | Exceeded `ENRICHMENT_MAX_BYTES`. |
+| 413 | `TOO_MANY_ROWS` | Exceeded `ENRICHMENT_MAX_ROWS`. |
+
+## `GET /api/enrichment`
+
+Lists all jobs (most recent first).
+
+## `GET /api/enrichment/:jobId`
+
+Returns job metadata and progress counters. Also includes `active: true|false`
+so the UI can tell whether an in-process worker is currently running the job.
+
+## `GET /api/enrichment/:jobId/rows`
+
+### Query params
+
+- `filter` — `all` (default), `enriched`, `flagged`, `needs_review`, or `failed`.
+- `search` — case-insensitive substring match against `Title Override`, `full_name`, `stage_name`, `organization` (original + enriched).
+
+Response `rows[]` includes each row's `original`, `enriched.row`,
+`enriched.audit`, per-row `status`, `title_quality_status`, `flag_reason`,
+`entity_type`, `confidence`, and `summary`.
+
+## `GET /api/enrichment/:jobId/rows/:rowIndex`
+
+Returns the full row detail plus its evidence sources (Serper organic results
+and any LLM-cited URLs, grouped by `source_type`).
+
+## `POST /api/enrichment/:jobId/start`
+
+Kicks off the worker. Returns `409 ALREADY_RUNNING` if a worker is already
+attached, or `409 JOB_TERMINAL` if the job has already completed (use
+`/retry` instead).
+
+### Body (all optional)
+
+```json
+{ "concurrency": 3, "maxSerpPerRow": 5, "model": "claude-sonnet-4-5" }
+```
+
+## `POST /api/enrichment/:jobId/cancel`
+
+Sets `cancelRequested: true` on the job. The worker checks this flag between
+rows and exits cleanly. Rows already enriched are preserved.
+
+## `POST /api/enrichment/:jobId/retry`
+
+Re-runs a subset of rows. Returns `409 ALREADY_RUNNING` if the worker is
+active on this job.
+
+### Body
+
+```json
+{ "scope": "failed" }
+{ "scope": "flagged" }
+{ "scope": "all" }
+{ "scope": "rows", "rowIndexes": [3, 7, 12] }
+```
+
+The counters are rewound to exclude the retried rows so the final tallies stay
+correct after the retry completes.
+
+## `GET /api/enrichment/:jobId/export`
+
+Downloads an enriched CSV. Content-Type is `text/csv; charset=utf-8`.
+
+### Query params
+
+- `scope` — `full` (default), `flagged`, or `failed`.
+
+The full export always emits columns in canonical order (input columns first,
+then review columns appended).
+
+## Per-row pipeline
+
+1. **Normalize + parse** `Title Override` (`parseTitleOverride`). Extracts a
+   trailing `(...)` group as `parenthetical` (e.g. `Michelle Joy (Cannons)` →
+   name=`Michelle Joy`, parenthetical=`Cannons`).
+2. **Plan queries** (`planQueries`), bounded by `ENRICHMENT_MAX_SERP_PER_ROW`.
+   The user's `query_override` (if non-empty) is prioritized first, followed
+   by name + affiliation, official-site probe, and Instagram probe.
+3. **Run SERP** — one Serper.dev call per query. Individual query failures do
+   not fail the row; if *all* queries fail the row is marked `failed` with
+   `error: SERP_FAILED`.
+4. **Build evidence dossier** — knowledge-graph entries, top organic results
+   (title/url/snippet, classified by `source_type`), and related searches.
+5. **Call Claude** via `tool_choice: {type: "tool", name: "record_artist_enrichment"}`
+   forcing structured output against a fixed JSON schema. On invalid output,
+   the worker retries once with a repair nudge; a second failure marks the
+   row `failed` with `error: LLM_BAD_OUTPUT`.
+6. **Merge into row** (`mergeProposal`). Non-empty user fields are always
+   preserved; the LLM's proposal is recorded in `enriched.audit` for later
+   inspection. Official social URLs are only accepted if they pass
+   `isProbablyOfficialUrl` (valid http(s), no `/search`, `/hashtag/`, etc.).
+7. **Derive status** (`deriveEnrichmentStatus`): `valid_unique` /
+   `valid_with_affiliation` map to `enriched` or `enriched_with_flags`; every
+   other title-quality value maps to `needs_review`.
+8. **Persist** — row + sources are written to disk via the enrichment store.
+   Job counters (`completedRows`, `flaggedRows`, `failedRows`) are updated
+   atomically.
+
+## Prompt-injection defenses
+
+- CSV cell values are wrapped in `<untrusted_csv_row>` blocks in the LLM
+  prompt with an explicit instruction that the blocks are DATA, not
+  instructions.
+- SERP results are wrapped in `<untrusted_serp_evidence>` blocks with the
+  same treatment. Snippets are trimmed to bound token cost and reduce
+  injection surface.
+- The model may only respond via the `record_artist_enrichment` tool call;
+  free-form text is ignored. Rows where the model refuses to call the tool
+  (or produces schema-invalid input) are marked `failed`.
+- On export, all cells beginning with `= + - @ \t \r` are apostrophe-
+  prefixed to neutralize spreadsheet formula injection.
+
+## Ownership
+
+There is no authentication in this repo. Job IDs are 128-bit random values,
+served as the `?job=<id>` query param in the UI. Anyone with the ID can view
+or download the results; anyone without it cannot enumerate jobs by ID.
+
+## Startup reconciliation
+
+`enrichmentStore.reconcileOnStartup()` runs on process boot and marks any job
+that was `running` at shutdown as `failed` with an "Interrupted by server
+restart" message. Users click **Retry failed** in the UI to resume such jobs
+without re-uploading the CSV.
+
+---
+
 # Third-Party APIs and Tooling
 
 ## Google / YouTube Data API
@@ -840,3 +1272,16 @@ Paste one or more URLs into the textarea and capture Cloudflare R2-hosted screen
 
 - **Purpose**: Extract TikTok metadata via `yt-dlp`.
 - **Used by**: `/api/tiktok/ytdlp`.
+
+## Serper.dev
+
+- **Purpose**: Google SERP results (organic, knowledge graph, related searches) used for artist-identity resolution.
+- **Used by**: `/api/enrichment/*` via `src/serpClient.js`.
+- **Auth**: `SERPER_API_KEY`.
+
+## Anthropic Claude
+
+- **Purpose**: Structured-output identity resolution for artist records; agentic Sheet writeback in the report augmentation tool.
+- **Used by**: `/api/enrichment/*` (strict tool-use), `/api/sheets/ask` (tool-use loop).
+- **Auth**: `ANTHROPIC_API_KEY`.
+- **Default model**: `claude-sonnet-4-5`; override the enrichment model with `ENRICHMENT_LLM_MODEL`.

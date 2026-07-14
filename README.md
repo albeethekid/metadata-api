@@ -295,6 +295,31 @@ GET /api/search/channels?q=blackpink&maxResults=5
 
 Returns the raw YouTube Data API response with additional fields.
 
+## UI: Artist Record Enrichment
+
+### URL
+
+/enrichment.html
+
+### Description
+
+Upload a CSV of artist / rights-holder records keyed on `Title Override`. The
+tool runs targeted Serper.dev searches and asks Claude (via a strict tool-use
+schema) to resolve identity, official socials, produced works, and media
+affiliations. Generic or ambiguous names are flagged for review rather than
+enriched blindly.
+
+- Drag-and-drop upload with preview
+- Per-row progress and cooperative cancel
+- Filters: all / enriched / flagged / needs_review / failed
+- Search by Title Override, full_name, stage_name, organization
+- Per-row evidence drawer with grouped source URLs
+- Downloads: full enriched CSV, flagged-only, failed-only
+
+Requires `SERPER_API_KEY` and `ANTHROPIC_API_KEY`. Jobs persist to disk under
+`data/enrichment/{jobId}/` so results survive page reloads and server
+restarts. See `API_REFERENCE.md` for the full endpoint contract.
+
 ## UI: Social Media Metadata → CSV Tool
 
 ### URL
