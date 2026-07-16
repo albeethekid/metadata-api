@@ -727,6 +727,62 @@ Fetch metadata for Spotify URLs using the Spotify Web API.
 
 - Supports some `creators.spotify.com` URLs via an HTML resolver.
 
+### Response (default, non-verbose)
+
+```json
+{
+  "platform": "spotify",
+  "inputUrl": "https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp",
+  "canonicalUrl": "https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp",
+  "type": "track",
+  "id": "3n3Ppam7vgaVa1iaRUc9Lp",
+  "title": "Smells Like Teen Spirit",
+  "publishedAt": "1991-09-10",
+  "durationSeconds": 301,
+  "heroImageUrl": "https://i.scdn.co/image/ab67616d0000b273...",
+  "channelHandle": "Nirvana"
+}
+```
+
+Field types:
+
+| Field | Type | Notes |
+|---|---|---|
+| `platform` | `string` | Always `"spotify"`. |
+| `inputUrl` | `string` | The `url` query param as received. |
+| `canonicalUrl` | `string` | Canonical `open.spotify.com/<type>/<id>` URL after any creators-URL resolution. |
+| `type` | `string` | One of `track`, `album`, `artist`, `playlist`, `show`, `episode`. |
+| `id` | `string` | Spotify entity ID. |
+| `title` | `string \| null` | See per-type source table below. |
+| `publishedAt` | `string \| null` | ISO date (release date). Null for `artist`, `playlist`, `show`. |
+| `durationSeconds` | `number \| null` | Only populated for `track` and `episode` (from `duration_ms`). |
+| `heroImageUrl` | `string \| null` | First image from the entity's `images` array. |
+| `channelHandle` | `string \| null` | Best-available "creator" label — see per-type source table below. |
+
+Per-type field source (all mappings live in `src/index.js`):
+
+| `type` | `title` | `publishedAt` | `durationSeconds` | `heroImageUrl` | `channelHandle` |
+|---|---|---|---|---|---|
+| `track` | `name` | `album.release_date` | `duration_ms / 1000` | `album.images[0].url` | `artists.map(a=>a.name).join(", ")` |
+| `album` | `name` | `release_date` | *(null)* | `images[0].url` | `artists.map(a=>a.name).join(", ")` |
+| `artist` | `name` | *(null)* | *(null)* | `images[0].url` | `name` |
+| `playlist` | `name` | *(null)* | *(null)* | `images[0].url` | `owner.display_name` |
+| `show` | `name` | *(null)* | *(null)* | `images[0].url` | `publisher` |
+| `episode` | `name` | `release_date` | `duration_ms / 1000` | `images[0].url` | `show.name` |
+
+With `verbose=1`, the raw Spotify Web API response is returned verbatim (fields depend on entity type — see Spotify's [Web API reference](https://developer.spotify.com/documentation/web-api/reference)).
+
+### Errors
+
+| Status | Error code | Meaning |
+|---|---|---|
+| `400` | `invalid_url` | `url` query param missing. |
+| `400` | `unsupported_spotify_url` | URL didn't parse as a supported Spotify entity. |
+| `400` | `unsupported_creators_url` | `creators.spotify.com` URL couldn't be resolved to a canonical entity. |
+| `500` | `spotify_client_error` | Missing `SPOTIFY_CLIENT_ID` / `SPOTIFY_SECRET` or token exchange failed. `detail` contains the underlying error. |
+| `502` | `spotify_api_error` | Spotify Web API rejected the request. `detail` contains the upstream error message. 429 rate limits are retried once when `Retry-After` is present. |
+| `500` | `internal_error` | Unexpected exception. `detail` contains the error message. |
+
 ### Upstream calls
 
 **Spotify Web API** (`src/spotify.js`). All calls are authenticated with a
@@ -765,6 +821,66 @@ Fetch enriched metadata (including streaming-related stats) for Spotify items vi
 ### Notes
 
 - Chartmetric is used for tracks/albums/artists/playlists. Spotify shows/episodes are handled via `/api/spotify/metadata`.
+
+### Response (default, non-verbose)
+
+```json
+{
+  "platform": "chartmetric",
+  "originalUrl": "https://open.spotify.com/track/3n3Ppam7vgaVa1iaRUc9Lp",
+  "videoId": "3n3Ppam7vgaVa1iaRUc9Lp",
+  "title": "Smells Like Teen Spirit",
+  "publishedAt": "1991-09-10",
+  "durationIso": "PT5M1S",
+  "durationSeconds": 301,
+  "viewCount": 1234567890,
+  "likeCount": null,
+  "commentCount": null,
+  "engagement_likeRate": null,
+  "engagement_commentRate": null,
+  "heroImageUrl": "https://i.scdn.co/image/ab67616d0000b273...",
+  "channelHandle": "Nirvana"
+}
+```
+
+Field types:
+
+| Field | Type | Notes |
+|---|---|---|
+| `platform` | `string` | Always `"chartmetric"`. |
+| `originalUrl` | `string` | The `url` query param as received. |
+| `videoId` | `string` | Spotify entity ID (the input ID, not the Chartmetric ID). |
+| `title` | `string \| null` | Chartmetric `obj.name`. |
+| `publishedAt` | `string \| null` | First non-null of `obj.release_date`, `obj.releaseDate`, `obj.last_updated`. |
+| `durationIso` | `string \| null` | ISO 8601 duration (derived from `durationSeconds`). Null when duration is unknown. |
+| `durationSeconds` | `number \| null` | From `obj.duration_ms / 1000`. Populated for tracks; null for artists/albums/playlists. |
+| `viewCount` | `number \| null` | First non-null of `obj.cm_statistics.sp_streams` (tracks) or `obj.followers` (playlists/artists). |
+| `likeCount` | `null` | Always null — Chartmetric doesn't expose per-item likes. |
+| `commentCount` | `null` | Always null. |
+| `engagement_likeRate` | `null` | Always null. |
+| `engagement_commentRate` | `null` | Always null. |
+| `heroImageUrl` | `string \| null` | First non-null of `obj.image_url`, `obj.imageUrl`, `obj.images[0].url`. |
+| `channelHandle` | `string \| null` | First non-null of `obj.artist_names`, `obj.artistNames`, `obj.artists.map(a=>a.name).join(", ")`, `obj.publisher`, `obj.owner_name`. |
+
+Notes on the shape:
+
+- The payload intentionally mirrors the YouTube/TikTok/Instagram video-metadata shape so downstream code (the CSV Generator, the Sheets processor, `urlProcessor`) can treat all platforms uniformly.
+- `videoId` is a misnomer for non-track entities; it's kept for cross-platform compatibility. It always holds the Spotify entity ID, regardless of type.
+- Chartmetric's raw response nests everything under `obj`. The endpoint unwraps this before mapping, so verbose mode still shows the full `{ obj: {...} }` envelope.
+
+With `verbose=1`, the raw Chartmetric API response is returned verbatim (see `src/chartmetric.js` for the per-entity-type endpoints hit).
+
+### Errors
+
+| Status | Error code | Meaning |
+|---|---|---|
+| `400` | `invalid_url` | `url` query param missing. |
+| `400` | `unsupported_spotify_url` | URL didn't parse as a supported Spotify entity. |
+| `400` | `unsupported_creators_url` | `creators.spotify.com` URL couldn't be resolved. |
+| `400` | `unsupported_type` | Spotify URL was a show or episode — use `/api/spotify/metadata` instead. `detail` is `"Chartmetric does not support Spotify shows or episodes"`. |
+| `500` | `chartmetric_client_error` | Missing `CHARTMETRICS_API_KEY` / `CHARTMETRIC_REFRESH_TOKEN` or token exchange failed. `detail` contains the underlying error. |
+| `502` | `chartmetric_api_error` | Chartmetric API rejected the request (invalid ID, playlist not found in Chartmetric's index, etc.). `detail` contains the upstream error. |
+| `500` | `internal_error` | Unexpected exception. `detail` contains the error message. |
 
 ### Upstream calls
 
