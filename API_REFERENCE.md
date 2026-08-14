@@ -424,6 +424,69 @@ Fetch TikTok video metadata via `yt-dlp`.
 
 ---
 
+## `GET /api/tiktok/tagged-music`
+
+Determine the music/sound tagged on a TikTok video.
+
+### Query params
+
+- `url` (required): a TikTok video URL matching `.../@handle/video/<id>`. Only
+  `tiktok.com` hosts are accepted — this is not a general-purpose URL fetcher.
+- `provider` (optional, default `scrapingbee`): `scrapingbee` or `oxylabs`.
+
+### Example
+
+```
+GET /api/tiktok/tagged-music?url=https%3A%2F%2Fwww.tiktok.com%2F%40whynowworld%2Fvideo%2F7371482618690391329
+```
+
+### Response
+
+```json
+{
+  "platform": "tiktok",
+  "url": "https://www.tiktok.com/@whynowworld/video/7371482618690391329",
+  "tagged_music": {
+    "id": "6751217784547461122",
+    "song_title": "Rolling in the Deep",
+    "artist": "Adele",
+    "album": "21",
+    "duration": 60,
+    "original": false
+  }
+}
+```
+
+If the video has no tagged music, `tagged_music` is `null` (this is a
+successful response, not an error).
+
+### How it works
+
+Fetches the TikTok page's HTML (`src/scrapingProviders.js`, provider
+selectable per request), then parses the embedded
+`__UNIVERSAL_DATA_FOR_REHYDRATION__` JSON blob
+(`src/tiktokMetadataParser.js`) to pull
+`__DEFAULT_SCOPE__["webapp.video-detail"].itemInfo.itemStruct.music`. Fetching
+and parsing are separate modules so a future provider can be swapped in
+without touching the parser.
+
+### Upstream calls
+
+- **ScrapingBee HTML API** (default provider) — `GET https://app.scrapingbee.com/api/v1/?url=<TIKTOK_URL>`. Auth: `SCRAPINGBEE_API_KEY`.
+- **Oxylabs residential proxy** (`provider=oxylabs`) — same proxy used by the other TikTok endpoints.
+
+### Errors
+
+- `400 MISSING_URL` / `INVALID_URL` / `NOT_TIKTOK_URL` / `UNSUPPORTED_TIKTOK_URL_FORMAT` / `UNSUPPORTED_PROVIDER`
+- `500 MISSING_SCRAPINGBEE_KEY` / `MISSING_OXYLABS_CREDENTIALS` — provider not configured
+- `502 SCRAPINGBEE_UPSTREAM_ERROR` / `SCRAPINGBEE_EMPTY_RESPONSE` / `OXYLABS_UPSTREAM_ERROR` / `OXYLABS_EMPTY_RESPONSE` — provider failed to retrieve the page
+- `504 SCRAPINGBEE_TIMEOUT` / `OXYLABS_TIMEOUT`
+- `502 TIKTOK_CHALLENGE_PAGE` — TikTok returned a block/challenge page instead of the video
+- `502 MISSING_REHYDRATION_DATA` / `INVALID_JSON` / `MISSING_VIDEO_DETAIL` / `MISSING_ITEM_STRUCT` — page structure didn't match what the parser expects (TikTok markup change, unexpected response, etc.)
+- `404 VIDEO_UNAVAILABLE` — video deleted/private/unavailable
+
+---
+
 ## `GET /api/tiktok/profiles`
 
 Search TikTok profiles by keyword (discovery) via EnsembleData and normalize results.
@@ -555,6 +618,68 @@ Same shape as `/api/instagram/video`:
 - `503` if `APIFY_API_KEY` not configured
 - `502` if Apify actor run fails
 - `404` if no data returned from Apify
+
+---
+
+## `GET /api/instagram/tagged-music`
+
+Determine the music/sound tagged on an Instagram post/reel.
+
+### Query params
+
+- `url` (required): an Instagram URL matching `/p/{shortcode}/`, `/reel/{shortcode}/`,
+  `/reels/{shortcode}/`, or `/tv/{shortcode}/`. Only `instagram.com` hosts are
+  accepted — this is not a general-purpose URL fetcher.
+
+### Example
+
+```
+GET /api/instagram/tagged-music?url=https%3A%2F%2Fwww.instagram.com%2Freels%2FC6Kg9FKt8lt%2F
+```
+
+### Response
+
+```json
+{
+  "platform": "instagram",
+  "url": "https://www.instagram.com/reels/C6Kg9FKt8lt/",
+  "tagged_music": {
+    "id": "1467739367151376",
+    "song_title": "Espresso",
+    "artist": "Sabrina Carpenter",
+    "original": false
+  }
+}
+```
+
+If the post has no tagged music, `tagged_music` is `null` (this is a
+successful response, not an error).
+
+### How it works
+
+Runs the `apify/instagram-scraper` actor (`src/apifyInstagramClient.js`,
+same actor `/api/instagram/video/apify` uses, called via its own independent
+copy of the run+fetch sequence), then extracts `post.musicInfo`
+(`src/instagramMetadataParser.js`) into a normalized shape. Fetching and
+parsing are separate modules, mirroring the TikTok tagged-music endpoint's
+architecture, so a different Instagram data source could be swapped in later
+without touching the parser.
+
+### Upstream calls
+
+- **Apify Platform API** — same `apify/instagram-scraper` actor run+dataset-fetch
+  sequence as `/api/instagram/video/apify` above. Auth: `APIFY_API_KEY`. Actor
+  billing: consumes Apify compute units per run.
+
+### Errors
+
+- `400 MISSING_URL` / `INVALID_URL` / `NOT_INSTAGRAM_URL` / `UNSUPPORTED_INSTAGRAM_URL_FORMAT`
+- `503 APIFY_API_KEY_NOT_CONFIGURED` — Apify not configured
+- `502 APIFY_RUN_FAILED` / `APIFY_NO_DATASET_ID` / `APIFY_DATASET_FAILED` — Apify failed to retrieve the post
+- `504 APIFY_TIMEOUT`
+- `404 POST_NOT_FOUND` — Apify returned no dataset items
+- `404 POST_UNAVAILABLE` — post deleted/private/unavailable (Apify returned an item with an `error` field instead of post data)
+- `502 PARSE_FAILED` — unexpected post data shape
 
 ---
 

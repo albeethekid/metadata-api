@@ -30,6 +30,7 @@
     .pill.fetched  { background: #e0f2fe; color: #075985; }
     .pill.ok       { background: #dcfce7; color: #166534; }
     .pill.err      { background: #fde2e2; color: #b42318; }
+    .pill.authorized { background: #ede9fe; color: #5b21b6; }
     .url-cell { max-width: 440px; word-break: break-all; font-family: monospace; font-size: 12px; }
     .err-cell { max-width: 360px; color: #b42318; font-size: 12px; }
     pre.help { background: #f6f8fa; padding: 10px; border-radius: 6px; font-size: 12px; overflow-x: auto; }
@@ -63,8 +64,10 @@ duration       ← durationSeconds (blank if N/A)
 view_count     ← viewCount
 published_date ← publishedAt
 like_count     ← likeCount
-comment_count  ← commentCount</pre>
+comment_count  ← commentCount
+tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Title", blank otherwise)</pre>
     <p class="muted">Headers missing from your Sheet are skipped silently. Only <code>page_url</code> is required. Rows where <code>final_relevance</code> is FALSE or <code>final_authorized</code> is TRUE are <strong>skipped</strong> (already triaged). Rows whose URL can't be processed are <strong>skipped entirely</strong> — nothing is written and existing cell content is preserved.</p>
+    <p class="muted"><code>client_category_override</code> is written with <code>source_authorized</code> when the row's handle or page_url's domain matches an entry in the team's source-authorization reference sheet — it's <strong>never blanked</strong> otherwise, since this column may also hold unrelated manual overrides.</p>
   </details>
 
   <div class="row">
@@ -213,7 +216,7 @@ comment_count  ← commentCount</pre>
     }
 
     function renderPreflightSummary(pf) {
-      const knownHeaders = ['title','content_url','handle','duration','view_count','published_date','like_count','comment_count'];
+      const knownHeaders = ['title','content_url','handle','duration','view_count','published_date','like_count','comment_count','tagged_music','client_category_override'];
       const present = knownHeaders.filter(h => h in pf.headerIndex);
       const missing = knownHeaders.filter(h => !(h in pf.headerIndex));
       const tasks = buildUniqueTasks(pf.rows);
@@ -432,8 +435,11 @@ comment_count  ← commentCount</pre>
       }
     }
 
-    // Send one Sheets API call for a chunk of completed rows.
-    async function flushWriteChunk(chunk) {
+    // Send one Sheets API call for a chunk of completed rows, plus any rows
+    // whose main fetch failed but were still flagged source_authorized —
+    // those get a surgical single-column write (see overrideRows).
+    async function flushWriteChunk(chunk, overrideChunk) {
+      overrideChunk = overrideChunk || [];
       try {
         const res = await fetch(`${API_BASE}/api/sheets/write-rows`, {
           method: 'POST',
@@ -441,13 +447,20 @@ comment_count  ← commentCount</pre>
           body: JSON.stringify({
             spreadsheetId: preflight.spreadsheetId,
             headerIndex:   preflight.headerIndex,
-            rows:          chunk
+            rows:          chunk,
+            overrideRows:  overrideChunk
           })
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
           // Mark all rows in chunk as write-failed so the user can see
           for (const r of chunk) {
+            updateRowStatus(r.rowIndex, 'err', {
+              error:   body.error || `HTTP_${res.status}`,
+              message: body.message || 'Sheet write failed'
+            });
+          }
+          for (const r of overrideChunk) {
             updateRowStatus(r.rowIndex, 'err', {
               error:   body.error || `HTTP_${res.status}`,
               message: body.message || 'Sheet write failed'
@@ -464,9 +477,20 @@ comment_count  ← commentCount</pre>
             pill.textContent = 'ok';
           }
         }
+        // Override-only rows keep their original error message (the main
+        // fetch still failed) but flip to an 'authorized' pill so it's
+        // clear the column got written anyway.
+        for (const r of overrideChunk) {
+          const tr = rowsTbody.querySelector(`tr[data-row-index="${r.rowIndex}"]`);
+          const pill = tr && tr.children[0].querySelector('.pill');
+          if (pill) { pill.className = 'pill authorized'; pill.textContent = 'authorized'; }
+        }
         return { ok: true, updated: body.updated || 0 };
       } catch (e) {
         for (const r of chunk) {
+          updateRowStatus(r.rowIndex, 'err', { error: 'NETWORK_ERROR', message: e.message });
+        }
+        for (const r of overrideChunk) {
           updateRowStatus(r.rowIndex, 'err', { error: 'NETWORK_ERROR', message: e.message });
         }
         return { ok: false, error: 'NETWORK_ERROR', message: e.message };
@@ -490,8 +514,9 @@ comment_count  ← commentCount</pre>
 
       let idx = 0;
       let tasksDone = 0;
-      let rowsOk = 0, rowsFailed = 0;
+      let rowsOk = 0, rowsFailed = 0, rowsAuthorizedOnly = 0;
       let writeBuffer = [];
+      let overrideBuffer = [];
       let writeRowsDone = 0, writeApiCalls = 0;
       let writeError = null;
 
@@ -502,17 +527,20 @@ comment_count  ← commentCount</pre>
         const dedupeNote = dupeRows > 0
           ? ` — ${totalRows} row${totalRows === 1 ? '' : 's'}, deduped to ${totalTasks} unique URL${totalTasks === 1 ? '' : 's'}`
           : '';
+        const authNote = rowsAuthorizedOnly > 0
+          ? ` (${rowsAuthorizedOnly} failed row${rowsAuthorizedOnly === 1 ? '' : 's'} still flagged source_authorized)`
+          : '';
         setOverall(
-          `Fetched ${tasksDone} / ${totalTasks} unique URLs (rows: ${rowsOk} ok, ${rowsFailed} failed)${dedupeNote}`, cls);
+          `Fetched ${tasksDone} / ${totalTasks} unique URLs (rows: ${rowsOk} ok, ${rowsFailed} failed)${authNote}${dedupeNote}`, cls);
       }
       function updateWrite() {
-        const expectedWrites = rowsOk;
+        const expectedWrites = rowsOk + rowsAuthorizedOnly;
         const cls = writeError
           ? 'err'
           : (tasksDone === totalTasks && writeRowsDone === expectedWrites ? 'ok' : 'muted');
         setWriteStatus(
-          `Wrote ${writeRowsDone} of ${expectedWrites} successful row${expectedWrites === 1 ? '' : 's'} back to Sheet ` +
-          `(${writeApiCalls} Sheets API call${writeApiCalls === 1 ? '' : 's'}${rowsFailed ? `; ${rowsFailed} skipped` : ''})` +
+          `Wrote ${writeRowsDone} of ${expectedWrites} row${expectedWrites === 1 ? '' : 's'} back to Sheet ` +
+          `(${writeApiCalls} Sheets API call${writeApiCalls === 1 ? '' : 's'}${rowsFailed - rowsAuthorizedOnly ? `; ${rowsFailed - rowsAuthorizedOnly} skipped` : ''})` +
           (writeError ? ` — last error: ${writeError}` : ''), cls);
       }
 
@@ -522,15 +550,16 @@ comment_count  ← commentCount</pre>
       // Serialize writes (only one Sheets write in flight at a time) but
       // let fetches keep streaming in.
       let writeChainTail = Promise.resolve();
-      function scheduleFlush(chunk) {
+      function scheduleFlush(chunk, overrideChunk) {
         writeChainTail = writeChainTail.then(async () => {
-          const result = await flushWriteChunk(chunk);
+          const result = await flushWriteChunk(chunk, overrideChunk);
           writeApiCalls += 1;
+          const n = chunk.length + overrideChunk.length;
           if (result.ok) {
-            writeRowsDone += chunk.length;
+            writeRowsDone += n;
           } else {
             writeError = `${result.error}: ${result.message}`;
-            writeRowsDone += chunk.length;
+            writeRowsDone += n;
           }
           updateWrite();
         });
@@ -552,11 +581,21 @@ comment_count  ← commentCount</pre>
             }
           } else {
             rowsFailed += n;
+            // The row's main fetch failed, but it may still have been
+            // flagged source_authorized (domain check needs no fetch at
+            // all) — write just that one column via a surgical edit.
+            if (out.normalized && out.normalized.clientCategoryOverride) {
+              rowsAuthorizedOnly += n;
+              for (const rowIndex of out.rowIndexes) {
+                overrideBuffer.push({ rowIndex, clientCategoryOverride: out.normalized.clientCategoryOverride });
+              }
+            }
           }
           updateOverall();
-          if (writeBuffer.length >= WRITE_BATCH_SIZE) {
+          if (writeBuffer.length + overrideBuffer.length >= WRITE_BATCH_SIZE) {
             const chunk = writeBuffer.splice(0, writeBuffer.length);
-            scheduleFlush(chunk);
+            const overrideChunk = overrideBuffer.splice(0, overrideBuffer.length);
+            scheduleFlush(chunk, overrideChunk);
           }
         }
       }
@@ -567,16 +606,20 @@ comment_count  ← commentCount</pre>
       );
       await Promise.all(workers);
 
-      if (writeBuffer.length > 0) {
+      if (writeBuffer.length > 0 || overrideBuffer.length > 0) {
         const chunk = writeBuffer.splice(0, writeBuffer.length);
-        scheduleFlush(chunk);
+        const overrideChunk = overrideBuffer.splice(0, overrideBuffer.length);
+        scheduleFlush(chunk, overrideChunk);
       }
       await writeChainTail;
 
       const finalCls = (rowsFailed > 0 || writeError) ? 'err' : 'ok';
+      const authSuffix = rowsAuthorizedOnly > 0
+        ? ` (${rowsAuthorizedOnly} of the failed rows were still flagged source_authorized)`
+        : '';
       setOverall(
         `Done. ${rowsOk} ok, ${rowsFailed} failed (of ${totalRows} row${totalRows === 1 ? '' : 's'}` +
-        (dupeRows > 0 ? `, ${totalTasks} unique fetch${totalTasks === 1 ? '' : 'es'}` : '') + `).`,
+        (dupeRows > 0 ? `, ${totalTasks} unique fetch${totalTasks === 1 ? '' : 'es'}` : '') + `).${authSuffix}`,
         finalCls);
       runBtn.disabled = false;
       preflightBtn.disabled = false;

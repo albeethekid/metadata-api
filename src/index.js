@@ -4,9 +4,13 @@ const YouTubeClient = require('./youtubeClient');
 const { getTranscript, TranscriptError, getDiagnostics } = require('./youtubeTranscript');
 const { getTikTokVideoMetrics, TikTokMetricsError } = require('./tiktokMetrics');
 const { getTikTokVideoMetricsYtdlp, TikTokYtdlpError } = require('./tiktokYtdlp');
+const { fetchTaggedMusic, TikTokTaggedMusicError } = require('./tiktokTaggedMusic');
+const { fetchTaggedMusic: fetchInstagramTaggedMusic, InstagramTaggedMusicError } = require('./instagramTaggedMusic');
+const { parseTaggedMusic: parseInstagramTaggedMusic } = require('./instagramMetadataParser');
 const { scrapeInstagramPost } = require('./instagramScraper');
 const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch, writeCellsByHeader } = require('./sheetsService');
 const { processUrl } = require('./urlProcessor');
+const { isSourceAuthorized } = require('./sourceAuthorization');
 const enrichmentCsv = require('./enrichmentCsv');
 const enrichmentStore = require('./enrichmentStore');
 const enrichmentWorker = require('./enrichmentWorker');
@@ -580,6 +584,16 @@ app.post('/api/sheets/fetch-row', async (req, res) => {
   const result = await processUrl(pageUrl, {
     includeScreenshots: includeScreenshots !== false  // default true
   });
+  // Runs regardless of ok — the domain check needs only the raw URL, and
+  // handle-derivation for tiktok/soundcloud/x/facebook/threads needs no
+  // fetch either, so a row that otherwise failed (or wasn't even a
+  // recognized platform) can still be flagged source_authorized.
+  const authorized = await isSourceAuthorized({
+    platform: result.platform,
+    channelHandle: result.normalized.channelHandle,
+    pageUrl
+  });
+  if (authorized) result.normalized.clientCategoryOverride = 'source_authorized';
   return res.json({
     ok: result.ok,
     rowIndex: rowIndex || null,
@@ -590,23 +604,25 @@ app.post('/api/sheets/fetch-row', async (req, res) => {
   });
 });
 
-// POST { spreadsheetId, headerIndex, rows: [{ rowIndex, normalized }] }
+// POST { spreadsheetId, headerIndex, rows: [{ rowIndex, normalized }], overrideRows?: [{ rowIndex, clientCategoryOverride }] }
 //   → { updated, rows }
 // Writes many rows back to the Sheet in ONE Sheets API call (values.batchUpdate).
 // Use this after collecting N results client-side via /api/sheets/fetch-row.
+// overrideRows are rows whose fetch failed but were still source_authorized —
+// only their client_category_override cell gets touched.
 app.post('/api/sheets/write-rows', async (req, res) => {
-  const { spreadsheetId, headerIndex, rows } = req.body || {};
+  const { spreadsheetId, headerIndex, rows, overrideRows } = req.body || {};
   if (!spreadsheetId || !headerIndex || !Array.isArray(rows)) {
     return res.status(400).json({
       error: 'MISSING_FIELDS',
       message: 'spreadsheetId, headerIndex and rows[] are required.'
     });
   }
-  if (rows.length === 0) {
+  if (rows.length === 0 && (!Array.isArray(overrideRows) || overrideRows.length === 0)) {
     return res.json({ updated: 0, rows: 0 });
   }
   try {
-    const result = await writeRowsBatch(spreadsheetId, headerIndex, rows);
+    const result = await writeRowsBatch(spreadsheetId, headerIndex, rows, overrideRows);
     return res.json(result);
   } catch (e) {
     return res.status(e.status || 500).json({
@@ -891,10 +907,23 @@ app.post('/api/sheets/process-row', async (req, res) => {
     includeScreenshots: includeScreenshots !== false
   });
 
-  // Failures are no-ops on the Sheet — leave the existing row untouched.
+  // Non-authorization failures are no-ops on the Sheet — leave the existing
+  // row untouched. The authorization check itself runs regardless of `ok`
+  // (see /api/sheets/fetch-row for why), and on failed rows it can still
+  // trigger a surgical single-column write so nothing else on the row is touched.
   try {
+    const authorized = await isSourceAuthorized({
+      platform: result.platform,
+      channelHandle: result.normalized.channelHandle,
+      pageUrl
+    });
     if (result.ok) {
+      if (authorized) result.normalized.clientCategoryOverride = 'source_authorized';
       await writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, result.normalized);
+    } else if (authorized) {
+      await writeCellsByHeader(spreadsheetId, headerIndex, [
+        { rowIndex, header: 'client_category_override', value: 'source_authorized' }
+      ]);
     }
   } catch (e) {
     return res.status(e.status || 500).json({
@@ -1345,6 +1374,23 @@ app.get('/api/tiktok/ytdlp', async (req, res) => {
     }
 
     console.error('Unexpected TikTok yt-dlp error:', error);
+    res.status(500).json({ error: 'INTERNAL_ERROR' });
+  }
+});
+
+// curl "http://localhost:3000/api/tiktok/tagged-music?url=https%3A%2F%2Fwww.tiktok.com%2F%40whynowworld%2Fvideo%2F7371482618690391329"
+app.get('/api/tiktok/tagged-music', async (req, res) => {
+  const { url, provider } = req.query;
+
+  try {
+    const payload = await fetchTaggedMusic(url, { provider });
+    res.json(payload);
+  } catch (error) {
+    if (error instanceof TikTokTaggedMusicError) {
+      return res.status(error.status).json({ error: error.code, message: error.message });
+    }
+
+    console.error('Unexpected TikTok tagged-music error:', error);
     res.status(500).json({ error: 'INTERNAL_ERROR' });
   }
 });
@@ -1807,7 +1853,7 @@ app.get('/api/instagram/video', async (req, res) => {
   if (!parsedUrl) {
     return res.status(400).json({
       error: "Invalid request",
-      detail: "Invalid Instagram URL. Supported formats: /p/{shortcode}/, /reel/{shortcode}/, /tv/{shortcode}/",
+      detail: "Invalid Instagram URL. Supported formats: /p/{shortcode}/, /reel/{shortcode}/, /reels/{shortcode}/, /tv/{shortcode}/",
       example: "/api/instagram/video?url=https%3A%2F%2Fwww.instagram.com%2Fp%2FC7usZ6gSsa0%2F"
     });
   }
@@ -1907,8 +1953,8 @@ function parseInstagramUrl(encodedUrl) {
     }
     
     const pathname = parsed.pathname;
-    const match = pathname.match(/^\/(p|reel|tv)\/([^\/]+)\/?$/);
-    
+    const match = pathname.match(/^\/(p|reel|reels|tv)\/([^\/]+)\/?$/);
+
     if (!match) {
       return null;
     }
@@ -1944,7 +1990,7 @@ app.get('/api/instagram/video/apify', async (req, res) => {
   if (!parsedUrl) {
     return res.status(400).json({
       error: "Invalid request",
-      detail: "Invalid Instagram URL. Supported formats: /p/{shortcode}/, /reel/{shortcode}/, /tv/{shortcode}/",
+      detail: "Invalid Instagram URL. Supported formats: /p/{shortcode}/, /reel/{shortcode}/, /reels/{shortcode}/, /tv/{shortcode}/",
       example: "/api/instagram/video/apify?url=https%3A%2F%2Fwww.instagram.com%2Fp%2FCgtXoBxr_FU%2F"
     });
   }
@@ -2003,6 +2049,13 @@ app.get('/api/instagram/video/apify', async (req, res) => {
 
     const post = itemsBody[0];
 
+    let taggedMusic = null;
+    try {
+      taggedMusic = parseInstagramTaggedMusic(post);
+    } catch (parseErr) {
+      console.error('Instagram tagged-music parse failed:', parseErr.message);
+    }
+
     // Normalize to match /api/instagram/video response shape
     const response = {
       platform: "instagram",
@@ -2012,6 +2065,7 @@ app.get('/api/instagram/video/apify', async (req, res) => {
       description: post.caption || null,
       authorHandle: post.ownerUsername || null,
       heroImageUrl: post.displayUrl || null,
+      taggedMusic,
       metrics: {
         views: post.videoViewCount ?? post.videoPlayCount ?? null,
         likes: post.likesCount ?? null,
@@ -2033,6 +2087,23 @@ app.get('/api/instagram/video/apify', async (req, res) => {
     return res.status(500).json({ error: 'INTERNAL_ERROR' });
   } finally {
     clearTimeout(timeout);
+  }
+});
+
+// curl "http://localhost:3000/api/instagram/tagged-music?url=https%3A%2F%2Fwww.instagram.com%2Freels%2FC6Kg9FKt8lt%2F"
+app.get('/api/instagram/tagged-music', async (req, res) => {
+  const { url } = req.query;
+
+  try {
+    const payload = await fetchInstagramTaggedMusic(url);
+    res.json(payload);
+  } catch (error) {
+    if (error instanceof InstagramTaggedMusicError) {
+      return res.status(error.status).json({ error: error.code, message: error.message });
+    }
+
+    console.error('Unexpected Instagram tagged-music error:', error);
+    res.status(500).json({ error: 'INTERNAL_ERROR' });
   }
 });
 
@@ -2836,14 +2907,19 @@ const indexData = {
         { path: '/api/tiktok/video/metrics?url=<URL>',     desc: 'Video metrics' },
         { path: '/api/tiktok/ytdlp?url=<URL>',             desc: 'Video metadata via yt-dlp' },
         { path: '/api/tiktok/profiles?query=<TERM>',       desc: 'Profile discovery (EnsembleData)',
-          example: '/api/tiktok/profiles?query=tolkien' }
+          example: '/api/tiktok/profiles?query=tolkien' },
+        { path: '/api/tiktok/tagged-music?url=<URL>&provider=scrapingbee|oxylabs', desc: 'Extracts the music/sound tagged on a TikTok video (song_title, artist, album) via ScrapingBee or Oxylabs',
+          example: '/api/tiktok/tagged-music?url=https%3A%2F%2Fwww.tiktok.com%2F%40whynowworld%2Fvideo%2F7371482618690391329' }
       ]
     },
     {
       name: 'Instagram',
       endpoints: [
         { path: '/api/instagram/video?url=<URL>',                       desc: 'Video/post metadata' },
-        { path: '/api/instagram/video/apify?url=<URL>&verbose=1',       desc: 'Via Apify instagram-scraper' },
+        { path: '/api/instagram/video/apify?url=<URL>&verbose=1',       desc: 'Via Apify instagram-scraper',
+          example: '/api/instagram/video/apify?url=https%3A%2F%2Fwww.instagram.com%2Freels%2FC6Kg9FKt8lt%2F&verbose=1' },
+        { path: '/api/instagram/tagged-music?url=<URL>',                desc: 'Extracts the music/sound tagged on an Instagram post/reel (song_title, artist) via Apify',
+          example: '/api/instagram/tagged-music?url=https%3A%2F%2Fwww.instagram.com%2Freels%2FC6Kg9FKt8lt%2F' },
         { path: '/api/instagram/profiles?query=<TERM>',                 desc: 'Profile discovery (EnsembleData + Apify enrichment)',
           example: '/api/instagram/profiles?query=tolkien' }
       ]

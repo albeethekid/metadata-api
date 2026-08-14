@@ -49,12 +49,12 @@ function extractTikTokInfo(parsedUrl) {
 
 function isSupportedInstagramPath(parsedUrl) {
   const parts = parsedUrl.pathname.split('/').filter(Boolean);
-  return parts.length >= 2 && (parts[0] === 'p' || parts[0] === 'reel' || parts[0] === 'tv');
+  return parts.length >= 2 && (parts[0] === 'p' || parts[0] === 'reel' || parts[0] === 'reels' || parts[0] === 'tv');
 }
 
 function extractInstagramShortcode(parsedUrl) {
   const parts = parsedUrl.pathname.split('/').filter(Boolean);
-  if (parts.length >= 2 && (parts[0] === 'p' || parts[0] === 'reel' || parts[0] === 'tv') && parts[1]) {
+  if (parts.length >= 2 && (parts[0] === 'p' || parts[0] === 'reel' || parts[0] === 'reels' || parts[0] === 'tv') && parts[1]) {
     return parts[1];
   }
   return null;
@@ -67,6 +67,77 @@ function extractSpotifyInfo(parsedUrl) {
   const id = m[2];
   const useChartmetric = ['track', 'album', 'artist', 'playlist'].includes(type);
   return { type, id, useChartmetric };
+}
+
+// Platforms with no dedicated API integration fall back to the screenshot
+// endpoint, but their handle can still be parsed for free straight out of
+// the URL path — no network call needed.
+const SOUNDCLOUD_RESERVED_PATHS = new Set([
+  'you', 'stream', 'discover', 'charts', 'search', 'tags', 'people',
+  'upload', 'pro', 'notifications', 'messages', 'settings', 'jobs',
+  'legal', 'imprint', 'pages', 'terms-of-use', 'connect', 'signin', 'logout'
+]);
+const X_RESERVED_PATHS = new Set([
+  'i', 'home', 'explore', 'notifications', 'messages', 'settings',
+  'search', 'compose', 'account', 'tos', 'privacy'
+]);
+const FACEBOOK_NON_HANDLE_PATHS = new Set([
+  'watch', 'profile.php', 'permalink.php', 'groups', 'pages', 'photo.php',
+  'story.php', 'plugins', 'dialog', 'login', 'help', 'policies', 'ads',
+  'business', 'marketplace', 'gaming', 'reel', 'share', 'events', 'l.php', 'media'
+]);
+
+function hostIs(host, domain) {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+// Like extractSocialHandle, but also names which of the 4 platforms matched.
+// This is the canonical (platform, handle) pair for these hosts — reused
+// both for classifyUrl's screenshot-fallback entries and for matching
+// against the source-authorization reference sheet.
+function extractSocialHandleWithPlatform(parsedUrl) {
+  const host = parsedUrl.hostname.toLowerCase();
+  const parts = parsedUrl.pathname.split('/').filter(Boolean);
+  if (!parts.length) return null;
+  const first = parts[0];
+
+  if (hostIs(host, 'soundcloud.com')) {
+    if (SOUNDCLOUD_RESERVED_PATHS.has(first.toLowerCase())) return null;
+    return { platform: 'soundcloud', handle: first };
+  }
+  if (hostIs(host, 'x.com') || hostIs(host, 'twitter.com')) {
+    if (X_RESERVED_PATHS.has(first.toLowerCase())) return null;
+    return { platform: 'x', handle: first };
+  }
+  if (hostIs(host, 'facebook.com')) {
+    if (FACEBOOK_NON_HANDLE_PATHS.has(first.toLowerCase()) || /^\d+$/.test(first)) return null;
+    return { platform: 'facebook', handle: first };
+  }
+  if (hostIs(host, 'threads.com') || hostIs(host, 'threads.net')) {
+    return first.startsWith('@') ? { platform: 'threads', handle: first } : null;
+  }
+  return null;
+}
+
+function extractSocialHandle(parsedUrl) {
+  const result = extractSocialHandleWithPlatform(parsedUrl);
+  return result ? result.handle : null;
+}
+
+// Canonical (platform, handle) pair derived purely from a URL's shape — no
+// network call. Covers tiktok plus the 4 screenshot-fallback platforms
+// (soundcloud, x/twitter, facebook, threads). Returns null for platforms
+// whose handle can't be read off the URL alone (instagram, youtube).
+function deriveHandleFromUrl(rawUrl) {
+  let parsedUrl;
+  try { parsedUrl = new URL(String(rawUrl).trim()); } catch (_) { return null; }
+
+  if (detectPlatform(parsedUrl) === 'tiktok') {
+    const info = extractTikTokInfo(parsedUrl);
+    if (info) return { platform: 'tiktok', handle: info.channelHandle.replace(/^@/, '') };
+    return null;
+  }
+  return extractSocialHandleWithPlatform(parsedUrl);
 }
 
 /**
@@ -113,8 +184,18 @@ function classifyUrl(rawUrl, includeScreenshots = true) {
     if (includeScreenshots) return { platform: 'screenshot', id: '', url: trimmed };
     return null;
   }
-  // Unknown platform
-  if (includeScreenshots) return { platform: 'screenshot', id: '', url: trimmed };
+  // Unknown platform. Handle extraction needs no network call, so it's
+  // available regardless of includeScreenshots — only the title/image
+  // screenshot fetch is gated by that flag.
+  const channelHandle = extractSocialHandle(parsedUrl);
+  if (includeScreenshots) {
+    return channelHandle
+      ? { platform: 'screenshot', id: '', url: trimmed, channelHandle }
+      : { platform: 'screenshot', id: '', url: trimmed };
+  }
+  if (channelHandle) {
+    return { platform: 'handle-only', id: '', url: trimmed, channelHandle };
+  }
   return null;
 }
 
@@ -151,6 +232,20 @@ async function fetchForEntry(entry, baseUrl) {
   return body;
 }
 
+// TikTok's primary fetch (yt-dlp) carries no tagged-music data, so this
+// self-calls the dedicated tagged-music endpoint separately. Never throws —
+// a tagged-music lookup failure must not fail the row's primary metadata.
+async function fetchTikTokTaggedMusic(entry, baseUrl) {
+  try {
+    const res = await fetch(`${baseUrl}/api/tiktok/tagged-music?url=${encodeURIComponent(entry.url)}`);
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => null);
+    return (body && body.tagged_music) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ---------- Normalization (ported from csv.html mapToCsvRows) ----------
 
 function normalizeDate(dateStr) {
@@ -180,8 +275,20 @@ function emptyNormalized() {
     engagement_commentRate: '',
     heroImageUrl: '',
     channelHandle: '',
-    links: ''
+    links: '',
+    taggedMusic: '',
+    clientCategoryOverride: ''
   };
+}
+
+// Formats a tagged_music object ({ artist, song_title, ... }) as "Artist -
+// Song Title". Falls back to whichever single field is present.
+function formatTaggedMusic(tm) {
+  if (!tm) return '';
+  const artist = (tm.artist || '').toString().trim();
+  const title = (tm.song_title || '').toString().trim();
+  if (artist && title) return `${artist} - ${title}`;
+  return artist || title || '';
 }
 
 function normalizeResponse(entry, item) {
@@ -200,6 +307,7 @@ function normalizeResponse(entry, item) {
     out.commentCount   = comments ?? '';
     out.heroImageUrl   = item.heroImageUrl ?? '';
     out.channelHandle  = entry.channelHandle ?? '';
+    out.taggedMusic    = formatTaggedMusic(item.taggedMusic);
     return out;
   }
 
@@ -214,14 +322,21 @@ function normalizeResponse(entry, item) {
     out.commentCount  = comments ?? '';
     out.heroImageUrl  = item.heroImageUrl ?? '';
     out.channelHandle = item.authorHandle ?? '';
+    out.taggedMusic   = formatTaggedMusic(item.taggedMusic);
     return out;
   }
 
   if (platform === 'screenshot') {
     const links = item.pageSignals?.links || [];
-    out.title        = item.title ?? '';
-    out.heroImageUrl = item.s3_url ?? '';
-    out.links        = links.map(l => l && l.href).filter(Boolean).join(', ');
+    out.title         = item.title ?? '';
+    out.heroImageUrl  = item.s3_url ?? '';
+    out.links         = links.map(l => l && l.href).filter(Boolean).join(', ');
+    out.channelHandle = entry.channelHandle ?? '';
+    return out;
+  }
+
+  if (platform === 'handle-only') {
+    out.channelHandle = entry.channelHandle ?? '';
     return out;
   }
 
@@ -266,9 +381,21 @@ async function processUrl(rawUrl, opts = {}) {
     };
   }
 
+  // Handle was parsed straight out of the URL — no fetch needed at all.
+  if (entry.platform === 'handle-only') {
+    return { ok: true, platform: entry.platform, normalized: normalizeResponse(entry, {}) };
+  }
+
   let data;
   try {
-    data = await fetchForEntry(entry, baseUrl);
+    const [primary, taggedMusic] = await Promise.all([
+      fetchForEntry(entry, baseUrl),
+      entry.platform === 'tiktok' ? fetchTikTokTaggedMusic(entry, baseUrl) : Promise.resolve(null)
+    ]);
+    data = primary;
+    if (entry.platform === 'tiktok' && data && !data.error) {
+      data.taggedMusic = taggedMusic;
+    }
   } catch (e) {
     return {
       ok: false,
@@ -298,5 +425,7 @@ module.exports = {
   classifyUrl,
   normalizeResponse,
   emptyNormalized,
+  formatTaggedMusic,
+  deriveHandleFromUrl,
   SELF_BASE_URL
 };

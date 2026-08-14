@@ -28,7 +28,8 @@ const COLUMN_MAP = [
   ['view_count',     'viewCount'],
   ['published_date', 'publishedAt'],
   ['like_count',     'likeCount'],
-  ['comment_count',  'commentCount']
+  ['comment_count',  'commentCount'],
+  ['tagged_music',   'taggedMusic']
 ];
 
 /**
@@ -250,6 +251,8 @@ async function readTabAsText(spreadsheetId, tabName, opts = {}) {
  * Rows with no normalized payload produce zero updates — the existing row
  * is left untouched.
  */
+const CLIENT_CATEGORY_OVERRIDE_HEADER = 'client_category_override';
+
 function buildRowUpdates(rowIndex, headerIndex, normalized) {
   if (!normalized) return [];
   const data = [];
@@ -259,6 +262,15 @@ function buildRowUpdates(rowIndex, headerIndex, normalized) {
     const v = normalized[normKey];
     const cellValue = (v === '' || v == null) ? '' : String(v);
     data.push({ range: a1, values: [[cellValue]] });
+  }
+  // client_category_override may already hold a manually-entered value
+  // unrelated to source authorization (it's a general override column) —
+  // only ever write it when we have a positive value; never blank it out.
+  if (normalized.clientCategoryOverride && CLIENT_CATEGORY_OVERRIDE_HEADER in headerIndex) {
+    data.push({
+      range: `${TAB_NAME}!${colLetter(headerIndex[CLIENT_CATEGORY_OVERRIDE_HEADER])}${rowIndex}`,
+      values: [[String(normalized.clientCategoryOverride)]]
+    });
   }
   return data;
 }
@@ -301,16 +313,30 @@ async function writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, normal
  * @param {Array<{rowIndex:number, normalized:?Object}>} rowOutputs
  * @returns {Promise<{updated:number, rows:number}>}
  */
-async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs) {
-  if (!Array.isArray(rowOutputs) || rowOutputs.length === 0) {
+// `overrideRows` are rows whose main fetch failed (or whose URL wasn't even
+// a recognized platform) but that were still flagged source_authorized —
+// e.g. { rowIndex, clientCategoryOverride: 'source_authorized' }. These get
+// a surgical single-column write, merged into the same batchUpdate call, so
+// nothing else on that row is touched.
+async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs, overrideRows) {
+  const rows = Array.isArray(rowOutputs) ? rowOutputs : [];
+  const overrides = Array.isArray(overrideRows) ? overrideRows : [];
+  if (rows.length === 0 && overrides.length === 0) {
     return { updated: 0, rows: 0 };
   }
   const data = [];
-  for (const r of rowOutputs) {
+  for (const r of rows) {
     const updates = buildRowUpdates(r.rowIndex, headerIndex, r.normalized);
     for (const u of updates) data.push(u);
   }
-  if (data.length === 0) return { updated: 0, rows: rowOutputs.length };
+  for (const o of overrides) {
+    if (!o || !o.clientCategoryOverride || !(CLIENT_CATEGORY_OVERRIDE_HEADER in headerIndex)) continue;
+    data.push({
+      range: `${TAB_NAME}!${colLetter(headerIndex[CLIENT_CATEGORY_OVERRIDE_HEADER])}${o.rowIndex}`,
+      values: [[String(o.clientCategoryOverride)]]
+    });
+  }
+  if (data.length === 0) return { updated: 0, rows: rows.length };
   const sheets = await getSheetsClient();
   try {
     await sheets.spreadsheets.values.batchUpdate({
@@ -320,7 +346,7 @@ async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs) {
   } catch (e) {
     throw wrapApiError(e, 502);
   }
-  return { updated: data.length, rows: rowOutputs.length };
+  return { updated: data.length, rows: rows.length };
 }
 
 /**
@@ -380,5 +406,7 @@ module.exports = {
   readTabAsText,
   writeRowMappedValues,
   writeRowsBatch,
-  writeCellsByHeader
+  writeCellsByHeader,
+  buildRowUpdates,
+  getSheetsClient
 };

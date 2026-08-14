@@ -216,6 +216,56 @@ Includes `heroImageUrls` and `raw` TikTok item object.
 - Video not found in JSON: 404 { "error": "VIDEO_NOT_FOUND" }
 - Unexpected error: 500 { "error": "INTERNAL_ERROR" }
 
+### GET /api/tiktok/tagged-music?url=<URL_ENCODED_TIKTOK_URL>[&provider=scrapingbee|oxylabs]
+
+Determines the music/sound tagged on a TikTok video by fetching the public page (via ScrapingBee or Oxylabs) and parsing TikTok's embedded JSON.
+
+- `url` (required): a TikTok video URL matching `.../@handle/video/<id>`. Only `tiktok.com` hosts are accepted.
+- `provider` (optional, default `scrapingbee`): `scrapingbee` or `oxylabs`.
+
+#### Example
+
+GET /api/tiktok/tagged-music?url=https%3A%2F%2Fwww.tiktok.com%2F%40whynowworld%2Fvideo%2F7371482618690391329
+
+#### Default response
+
+```json
+{
+  "platform": "tiktok",
+  "url": "https://www.tiktok.com/@whynowworld/video/7371482618690391329",
+  "tagged_music": {
+    "id": "6751217784547461122",
+    "song_title": "Rolling in the Deep",
+    "artist": "Adele",
+    "album": "21",
+    "duration": 60,
+    "original": false
+  }
+}
+```
+
+If the video has no tagged music, `tagged_music` is `null` — this is a successful response, not an error.
+
+#### Error behavior
+
+- Missing `url`: 400 `{ "error": "MISSING_URL" }`
+- Malformed URL: 400 `{ "error": "INVALID_URL" }`
+- Non-TikTok host: 400 `{ "error": "NOT_TIKTOK_URL" }`
+- Not a video URL: 400 `{ "error": "UNSUPPORTED_TIKTOK_URL_FORMAT" }`
+- Unknown `provider`: 400 `{ "error": "UNSUPPORTED_PROVIDER" }`
+- Provider not configured: 500 `{ "error": "MISSING_SCRAPINGBEE_KEY" | "MISSING_OXYLABS_CREDENTIALS" }`
+- Provider timeout: 504 `{ "error": "SCRAPINGBEE_TIMEOUT" | "OXYLABS_TIMEOUT" }`
+- Provider fetch failure: 502 `{ "error": "SCRAPINGBEE_UPSTREAM_ERROR" | "SCRAPINGBEE_EMPTY_RESPONSE" | "OXYLABS_UPSTREAM_ERROR" | "OXYLABS_EMPTY_RESPONSE" }`
+- TikTok challenge/block page: 502 `{ "error": "TIKTOK_CHALLENGE_PAGE" }`
+- Unexpected page structure: 502 `{ "error": "MISSING_REHYDRATION_DATA" | "INVALID_JSON" | "MISSING_VIDEO_DETAIL" | "MISSING_ITEM_STRUCT" }`
+- Video deleted/private/unavailable: 404 `{ "error": "VIDEO_UNAVAILABLE" }`
+- Unexpected error: 500 `{ "error": "INTERNAL_ERROR" }`
+
+#### Implementation notes
+
+- Fetching (`src/scrapingProviders.js`) and parsing (`src/tiktokMetadataParser.js`) are separate modules — the parser is provider-independent, so a future provider can be added without touching it. See `src/tiktokTaggedMusic.js` for the orchestration.
+- See `API_REFERENCE.md` for the full upstream-call breakdown.
+
 ### GET /api/instagram/video?url=<INSTAGRAM_URL>
 
 Fetches normalized metadata for Instagram posts by scraping the public page and extracting embedded data.
@@ -223,7 +273,7 @@ Fetches normalized metadata for Instagram posts by scraping the public page and 
 #### Supported Instagram URLs
 
 - **Posts**: `https://www.instagram.com/p/{shortcode}/`
-- **Reels**: `https://www.instagram.com/reel/{shortcode}/`
+- **Reels**: `https://www.instagram.com/reel/{shortcode}/` or `https://www.instagram.com/reels/{shortcode}/`
 - **TV**: `https://www.instagram.com/tv/{shortcode}/`
 
 #### Example
@@ -260,6 +310,51 @@ Includes `debug` object with screenshots and captured data.
 - **Author Handle**: Extracted from description hashtags using smart prioritization
 - **Proxy Support**: Configurable via proxy parameter
 - **Error behavior**: Similar to TikTok endpoint
+
+### GET /api/instagram/tagged-music?url=<URL_ENCODED_INSTAGRAM_URL>
+
+Determines the music/sound tagged on an Instagram post/reel via Apify's `instagram-scraper` actor.
+
+- `url` (required): an Instagram URL matching `/p/`, `/reel/`, `/reels/`, or `/tv/`. Only `instagram.com` hosts are accepted.
+
+#### Example
+
+GET /api/instagram/tagged-music?url=https%3A%2F%2Fwww.instagram.com%2Freels%2FC6Kg9FKt8lt%2F
+
+#### Default response
+
+```json
+{
+  "platform": "instagram",
+  "url": "https://www.instagram.com/reels/C6Kg9FKt8lt/",
+  "tagged_music": {
+    "id": "1467739367151376",
+    "song_title": "Espresso",
+    "artist": "Sabrina Carpenter",
+    "original": false
+  }
+}
+```
+
+If the post has no tagged music, `tagged_music` is `null` — this is a successful response, not an error.
+
+#### Error behavior
+
+- Missing `url`: 400 `{ "error": "MISSING_URL" }`
+- Malformed URL: 400 `{ "error": "INVALID_URL" }`
+- Non-Instagram host: 400 `{ "error": "NOT_INSTAGRAM_URL" }`
+- Not a post/reel/tv URL: 400 `{ "error": "UNSUPPORTED_INSTAGRAM_URL_FORMAT" }`
+- Apify not configured: 503 `{ "error": "APIFY_API_KEY_NOT_CONFIGURED" }`
+- Apify fetch failure: 502 `{ "error": "APIFY_RUN_FAILED" | "APIFY_NO_DATASET_ID" | "APIFY_DATASET_FAILED" }`
+- Apify timeout: 504 `{ "error": "APIFY_TIMEOUT" }`
+- Post deleted/private/unavailable: 404 `{ "error": "POST_UNAVAILABLE" }`
+- Unexpected error: 500 `{ "error": "INTERNAL_ERROR" }`
+
+#### Implementation notes
+
+- Fetching (`src/apifyInstagramClient.js`) and parsing (`src/instagramMetadataParser.js`) are separate modules, mirroring the TikTok tagged-music endpoint's architecture (see `src/instagramTaggedMusic.js` for orchestration).
+- Uses the same `apify/instagram-scraper` actor as `/api/instagram/video/apify`, via its own independent run+fetch call — the two endpoints don't share code, so this doesn't touch that endpoint's behavior.
+- See `API_REFERENCE.md` for the full upstream-call breakdown.
 
 ### GET /api/search/channels?q=<QUERY>[&maxResults=50][&verbose=1]
 
@@ -440,6 +535,7 @@ Only successfully fetched videos produce rows.
 - Resolves the video object by matching the numeric video ID.
 - No headless browsers; pure HTTP fetch + JSON parsing.
 - Rate-limit aware; client-side concurrency limited to 5.
+- `/api/tiktok/tagged-music` fetches the page via a pluggable scraping provider (`src/scrapingProviders.js`): **ScrapingBee** (`SCRAPINGBEE_API_KEY`, default) or the existing **Oxylabs** residential proxy. Same `__UNIVERSAL_DATA_FOR_REHYDRATION__` payload, parsed by `src/tiktokMetadataParser.js` independent of which provider fetched it.
 
 ### YouTube
 
