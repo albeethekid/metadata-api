@@ -13,6 +13,14 @@ class TikTokYtdlpError extends Error {
 let ytDlpInstance = null;
 let isDownloading = false;
 
+// yt-dlp releases after this one broke TikTok extraction ("Unexpected
+// response from webpage request" — confirmed reproducible even without a
+// proxy, so it's a TikTok-side extractor regression, not blocking). Pinned
+// to the last version confirmed working; bump this once upstream fixes it
+// (check https://github.com/yt-dlp/yt-dlp/releases for a TikTok fix, or
+// just try removing the pin and re-testing a TikTok URL).
+const PINNED_YTDLP_VERSION = '2026.02.04';
+
 function isServerlessEnvironment() {
   // Detect Vercel, AWS Lambda, or other serverless environments
   return process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT;
@@ -95,9 +103,9 @@ async function getYtDlpInstance() {
   } catch (error) {
     if (!isDownloading) {
       isDownloading = true;
-      console.log('yt-dlp binary not found, downloading...');
+      console.log(`yt-dlp binary not found, downloading pinned version ${PINNED_YTDLP_VERSION}...`);
       try {
-        await YTDlpWrap.downloadFromGithub(binaryPath);
+        await YTDlpWrap.downloadFromGithub(binaryPath, PINNED_YTDLP_VERSION);
         console.log('yt-dlp binary downloaded successfully');
         
         fixYtdlpShebang(binaryPath, pythonPath);
@@ -149,8 +157,13 @@ async function getTikTokVideoMetricsYtdlp(encodedUrl, verbose = false, useProxy 
       throw new TikTokYtdlpError(503, 'PYTHON_VERSION_UNSUPPORTED');
     }
     
-    // Check for Python not found (common in serverless)
-    if (error.message && (error.message.includes('python3.11') || error.message.includes('ENOENT'))) {
+    // Check for Python not found (common in serverless). ENOENT is Node's
+    // actual "executable not found" signal from a failed spawn — don't key
+    // off a bare mention of "python3.11" alone, since that substring also
+    // appears in yt-dlp's own informational deprecation warning text
+    // ("Please update to Python 3.11 or above") when Python is present and
+    // working fine, which previously caused false PYTHON_NOT_FOUND reports.
+    if (error.message && error.message.includes('ENOENT')) {
       if (isServerlessEnvironment()) {
         throw new TikTokYtdlpError(503, 'SERVERLESS_UNSUPPORTED');
       }
