@@ -176,6 +176,10 @@ async function readReportTab(spreadsheetId) {
   const pageUrlCol = headerIndex[PAGE_URL_HEADER];
   const finalRelevanceCol  = headerIndex['final_relevance'];
   const finalAuthorizedCol = headerIndex['final_authorized'];
+  // Mapped columns actually present in this sheet — used to snapshot each
+  // row's current values so the write step can skip cells that are already
+  // populated instead of overwriting them with a fresh fetch.
+  const mappedCols = COLUMN_MAP.map(([sheetCol]) => sheetCol).filter(c => c in headerIndex);
   const rows = [];
   let skippedFiltered = 0;
   for (let i = 1; i < values.length; i++) {
@@ -193,9 +197,12 @@ async function readReportTab(spreadsheetId) {
       skippedFiltered++;
       continue;
     }
+    const existing = {};
+    for (const c of mappedCols) existing[c] = String(rowVals[headerIndex[c]] || '').trim();
     rows.push({
       rowIndex: i + 1, // 1-based spreadsheet row number (header is row 1)
-      pageUrl
+      pageUrl,
+      existing
     });
   }
 
@@ -249,24 +256,36 @@ async function readTabAsText(spreadsheetId, tabName, opts = {}) {
  * Sheet are silently skipped, so partial schemas are fine.
  *
  * Rows with no normalized payload produce zero updates — the existing row
- * is left untouched.
+ * is left untouched. Same for individual fields: a field that came back
+ * null/empty from this fetch is skipped rather than written as blank, so
+ * a transient upstream miss (e.g. a platform response missing a thumbnail
+ * or description) can't clobber good data already in that cell. And when
+ * `existing` is given, a field already populated in the Sheet is left
+ * alone even if the fresh fetch has a (possibly different) value — this
+ * tool only fills in blanks, it never overwrites what's already there.
+ *
+ * @param {?Object<string,string>} existing  current value per sheetCol
+ *   (from readReportTab's per-row snapshot), or null/undefined to skip
+ *   this check (e.g. callers that never captured a snapshot).
  */
 const CLIENT_CATEGORY_OVERRIDE_HEADER = 'client_category_override';
 
-function buildRowUpdates(rowIndex, headerIndex, normalized) {
+function buildRowUpdates(rowIndex, headerIndex, normalized, existing) {
   if (!normalized) return [];
   const data = [];
   for (const [sheetCol, normKey] of COLUMN_MAP) {
     if (!(sheetCol in headerIndex)) continue;
-    const a1 = `${TAB_NAME}!${colLetter(headerIndex[sheetCol])}${rowIndex}`;
+    if (existing && existing[sheetCol]) continue; // already populated — never overwrite
     const v = normalized[normKey];
-    const cellValue = (v === '' || v == null) ? '' : String(v);
-    data.push({ range: a1, values: [[cellValue]] });
+    if (v === '' || v == null) continue;
+    const a1 = `${TAB_NAME}!${colLetter(headerIndex[sheetCol])}${rowIndex}`;
+    data.push({ range: a1, values: [[String(v)]] });
   }
   // client_category_override may already hold a manually-entered value
   // unrelated to source authorization (it's a general override column) —
   // only ever write it when we have a positive value; never blank it out.
-  if (normalized.clientCategoryOverride && CLIENT_CATEGORY_OVERRIDE_HEADER in headerIndex) {
+  if (normalized.clientCategoryOverride && CLIENT_CATEGORY_OVERRIDE_HEADER in headerIndex &&
+      !(existing && existing[CLIENT_CATEGORY_OVERRIDE_HEADER])) {
     data.push({
       range: `${TAB_NAME}!${colLetter(headerIndex[CLIENT_CATEGORY_OVERRIDE_HEADER])}${rowIndex}`,
       values: [[String(normalized.clientCategoryOverride)]]
@@ -276,15 +295,45 @@ function buildRowUpdates(rowIndex, headerIndex, normalized) {
 }
 
 /**
+ * Snapshot a single row's current values for every mapped column present
+ * in the Sheet, so a caller can pass it to buildRowUpdates and avoid
+ * overwriting cells that are already populated.
+ */
+async function getExistingMappedValues(spreadsheetId, rowIndex, headerIndex) {
+  const sheets = await getSheetsClient();
+  let resp;
+  try {
+    resp = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${TAB_NAME}!${rowIndex}:${rowIndex}`
+    });
+  } catch (e) {
+    throw wrapApiError(e, 502);
+  }
+  const rowVals = (resp.data.values && resp.data.values[0]) || [];
+  const existing = {};
+  for (const [sheetCol] of COLUMN_MAP) {
+    if (!(sheetCol in headerIndex)) continue;
+    existing[sheetCol] = String(rowVals[headerIndex[sheetCol]] || '').trim();
+  }
+  if (CLIENT_CATEGORY_OVERRIDE_HEADER in headerIndex) {
+    existing[CLIENT_CATEGORY_OVERRIDE_HEADER] = String(rowVals[headerIndex[CLIENT_CATEGORY_OVERRIDE_HEADER]] || '').trim();
+  }
+  return existing;
+}
+
+/**
  * Write the mapped values back to the given row. Failures (no normalized)
- * are no-ops — the row is left untouched.
+ * are no-ops — the row is left untouched. Reads the row's current values
+ * first so already-populated cells are never overwritten.
  * @param {string} spreadsheetId
  * @param {number} rowIndex            1-based row in the `report` tab
  * @param {Object<string,number>} headerIndex
  * @param {?Object} normalized         result of urlProcessor.normalizeResponse
  */
 async function writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, normalized) {
-  const data = buildRowUpdates(rowIndex, headerIndex, normalized);
+  const existing = await getExistingMappedValues(spreadsheetId, rowIndex, headerIndex);
+  const data = buildRowUpdates(rowIndex, headerIndex, normalized, existing);
   if (data.length === 0) return { updated: 0 };
   const sheets = await getSheetsClient();
   try {
@@ -310,7 +359,9 @@ async function writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, normal
  *
  * @param {string} spreadsheetId
  * @param {Object<string,number>} headerIndex
- * @param {Array<{rowIndex:number, normalized:?Object}>} rowOutputs
+ * @param {Array<{rowIndex:number, normalized:?Object, existing:?Object<string,string>}>} rowOutputs
+ *   `existing` is each row's pre-fetch snapshot from readReportTab, used to
+ *   skip cells that are already populated instead of overwriting them.
  * @returns {Promise<{updated:number, rows:number}>}
  */
 // `overrideRows` are rows whose main fetch failed (or whose URL wasn't even
@@ -326,7 +377,7 @@ async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs, overrideRo
   }
   const data = [];
   for (const r of rows) {
-    const updates = buildRowUpdates(r.rowIndex, headerIndex, r.normalized);
+    const updates = buildRowUpdates(r.rowIndex, headerIndex, r.normalized, r.existing);
     for (const u of updates) data.push(u);
   }
   for (const o of overrides) {

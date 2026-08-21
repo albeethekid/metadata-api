@@ -1138,14 +1138,45 @@ The Sheets Processor UI is a thin client over these routes. They are also docume
 | Endpoint | Sheets API calls |
 |---|---|
 | `POST /api/sheets/preflight` | `spreadsheets.get` + `spreadsheets.values.get` (report tab range) |
-| `POST /api/sheets/fetch-row` | None — pure metadata fetch via `processUrl`; no Sheet I/O |
+| `POST /api/sheets/fetch-row` | No I/O against the report sheet itself, but the source-authorization check (below) reads a separate reference sheet |
 | `POST /api/sheets/write-rows` | One `spreadsheets.values.batchUpdate` regardless of row count |
 | `POST /api/sheets/ask` | `spreadsheets.values.get` per included tab (report + optional extras). If `writeBack=true`, each `update_report_cells` tool call issues an additional `spreadsheets.values.batchUpdate`. |
-| `POST /api/sheets/process-row` | `spreadsheets.values.get` (or cached headerIndex) + `spreadsheets.values.batchUpdate` on success |
+| `POST /api/sheets/process-row` | `spreadsheets.values.get` (or cached headerIndex) + `spreadsheets.values.batchUpdate` on success, plus the same source-authorization read |
 
 **Anthropic Messages API** (only for `/api/sheets/ask`) — `POST https://api.anthropic.com/v1/messages`, up to 8 iterations per request (agentic tool-use loop). Model: `claude-sonnet-4-5`. Auth: `ANTHROPIC_API_KEY`.
 
-**Downstream metadata fetches** — `/api/sheets/fetch-row` and `/api/sheets/process-row` route the row's `page_url` through `src/urlProcessor.js`, which in turn calls the platform-specific endpoints documented above (`/api/video/:id`, `/api/tiktok/*`, `/api/instagram/*`, `/api/chartmetric/metadata`, `/api/spotify/metadata`, `/api/screenshot`, etc.). Upstream costs cascade accordingly.
+**Source authorization** (`src/sourceAuthorization.js`, both `/api/sheets/fetch-row` and `/api/sheets/process-row`) — checks the row's `(platform, handle)`/hostname against a fixed reference spreadsheet (`AUTHORIZED_SOURCES_SHEET_ID`) to decide whether to set `clientCategoryOverride: 'source_authorized'`. Runs regardless of whether the row's metadata fetch succeeded. Three `spreadsheets.values.get` calls (`handles by platform`, `handles in URLs`, `domains` tabs) load the reference sheet, cached in-process for 5 minutes — so this is 3 Sheets API calls per cache window, not per row.
+
+**Downstream metadata fetches** — `/api/sheets/fetch-row` and `/api/sheets/process-row` route the row's `page_url` through `src/urlProcessor.js`, which classifies the URL by platform and calls exactly one primary fetch (plus, for TikTok, a parallel tagged-music fetch). Each platform's third-party calls, the literal upstream endpoints, and the condition that triggers them:
+
+- **YouTube Data API v3** — triggered when `page_url` is a YouTube video URL (`watch?v=`, `youtu.be/`, or `/shorts/`).
+  - `GET youtube.videos.list` (`part=snippet,statistics,contentDetails`) — the video's title, stats, duration.
+  - `GET youtube.channels.list` (`part=snippet`) — the uploading channel's handle. Non-fatal if it fails.
+
+- **`yt-dlp` (local subprocess) via Oxylabs residential proxy** — triggered when `page_url` matches `.../@handle/video/<id>` on `tiktok.com`. Runs `yt-dlp --dump-single-json <url>` to extract the video's stats/author/formats in one call. Routed through the Oxylabs proxy by default (`OXYLABS_*`); pass `proxy=0` to disable. Not a hosted third-party API — no request leaves the box except through the proxy tunnel.
+
+- **ScrapingBee HTML API** (default provider) — triggered in parallel with the yt-dlp call, for the same TikTok rows, to look up the video's tagged music/sound (yt-dlp's payload doesn't include it).
+  - `GET https://app.scrapingbee.com/api/v1/?url=<TIKTOK_URL>` — fetches the TikTok page's raw HTML so `src/tiktokMetadataParser.js` can pull `itemStruct.music` out of the embedded rehydration JSON. Auth: `SCRAPINGBEE_API_KEY`. (Switches to the Oxylabs proxy instead if `provider=oxylabs` is passed — not exercised by the augmentation tool, which always uses the default.)
+
+- **Apify Platform API** — triggered when `page_url` path matches `/p/`, `/reel/`, `/reels/`, or `/tv/` on `instagram.com`.
+  - `POST /v2/acts/apify~instagram-scraper/runs` (`directUrls=[<url>]`) — starts a synchronous actor run.
+  - `GET /v2/actor-runs/<runId>` — polls until the run finishes.
+  - `GET /v2/datasets/<defaultDatasetId>/items` — fetches the scraped post/reel data (caption, stats, author, hero image). Auth: `APIFY_API_KEY`.
+
+- **Spotify Web API** — triggered when `page_url` is a Spotify `show` or `episode` URL.
+  - `POST https://accounts.spotify.com/api/token` (`grant_type=client_credentials`) — only when the cached bearer token is missing/expired.
+  - `GET https://api.spotify.com/v1/shows/{id}` or `GET https://api.spotify.com/v1/episodes/{id}` — the actual metadata lookup. Auth: `SPOTIFY_CLIENT_ID` + `SPOTIFY_SECRET`.
+
+- **Chartmetric API** — triggered when `page_url` is a Spotify `track`, `album`, `artist`, or `playlist` URL (these go to Chartmetric instead of the raw Spotify API, for its enriched stats).
+  - `POST https://api.chartmetric.com/api/token` (`refreshtoken`) — only when the cached bearer token is missing/expired.
+  - Track/album/artist: `GET /{type}/spotify/{spotifyId}/get-ids` → `GET /{type}/{cmId}` (Spotify ID resolved to a Chartmetric ID, then fetched).
+  - Playlist: `GET /search?q=spotify:playlist:{id}&type=playlists` → `GET /playlist/spotify/{cmId}`.
+
+- **Playwright/Chromium (local) + Oxylabs proxy + Cloudflare R2** — triggered when `page_url` doesn't match any of the above (the screenshot fallback), and only when `includeScreenshots` is true (the default for both `fetch-row` and `process-row`). `urlProcessor.js` always requests `storage_provider=cloudflare`, so the R2 upload isn't optional here.
+  - Playwright launches headless Chromium (routed through the Oxylabs proxy by default) and navigates to `page_url` to capture a screenshot buffer — local rendering, not a hosted API call.
+  - `PutObject` to the `R2_BUCKET` bucket via the S3-compatible SDK (`src/r2-storage.js`) — uploads the screenshot and returns its public `s3_url`. Auth: `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`.
+
+Upstream costs cascade accordingly — a single sheet row can fan out into a YouTube quota unit, a Chartmetric token+lookup, an Apify actor run, a ScrapingBee page fetch, etc., depending on its platform.
 
 ### Implementation notes
 
@@ -1467,12 +1498,26 @@ without re-uploading the CSV.
 ## Google / YouTube Data API
 
 - **Purpose**: YouTube video/channel search, metadata, playlists, comments, trending.
-- **Used by**: `YouTubeClient`.
+- **Used by**: `YouTubeClient`; reached from the report augmentation tool via `/api/video/:videoId`.
+
+## Google Sheets API v4
+
+- **Purpose**: Read/write the user's report sheet; read the fixed authorized-sources reference sheet.
+- **Used by**:
+  - `/api/sheets/preflight`, `/api/sheets/write-rows`, `/api/sheets/ask`, `/api/sheets/process-row` (report sheet I/O, `src/sheetsService.js`)
+  - `/api/sheets/fetch-row` and `/api/sheets/process-row` (authorized-sources reference sheet lookup, `src/sourceAuthorization.js`, 5-minute in-process cache)
+- **Auth**: service-account JSON key.
 
 ## Chartmetric
 
 - **Purpose**: Enriched metadata for Spotify items (tracks/albums/artists/playlists).
-- **Used by**: `/api/chartmetric/metadata`.
+- **Used by**: `/api/chartmetric/metadata`; reached from the report augmentation tool for Spotify track/album/artist/playlist rows.
+
+## Spotify Web API
+
+- **Purpose**: Metadata for Spotify shows/episodes (and the raw lookup Chartmetric doesn't cover).
+- **Used by**: `/api/spotify/metadata`; reached from the report augmentation tool for Spotify show/episode rows.
+- **Auth**: `SPOTIFY_CLIENT_ID` + `SPOTIFY_SECRET`.
 
 ## EnsembleData
 
@@ -1484,27 +1529,35 @@ without re-uploading the CSV.
 
 ## Apify
 
-- **Purpose**: Instagram profile enrichment/scraping after discovery.
-- **Used by**: `/api/instagram/profiles` via actor `apify/instagram-profile-scraper`.
+- **Purpose**: Instagram scraping — profile enrichment after discovery, and per-post/reel metadata.
+- **Used by**:
+  - `/api/instagram/profiles` via actor `apify/instagram-profile-scraper`
+  - `/api/instagram/video/apify` via actor `apify/instagram-scraper` — reached from the report augmentation tool for Instagram rows
 - **Auth**: `APIFY_API_KEY`.
+
+## ScrapingBee
+
+- **Purpose**: Fetch a TikTok video page's raw HTML (default provider) to parse its tagged music/sound.
+- **Used by**: `/api/tiktok/tagged-music` (default `provider=scrapingbee`) — reached from the report augmentation tool in parallel with `/api/tiktok/ytdlp` for TikTok rows.
+- **Auth**: `SCRAPINGBEE_API_KEY`.
 
 ## Playwright
 
 - **Purpose**: High-fidelity page rendering and screenshot capture.
-- **Used by**: `/api/screenshot`.
+- **Used by**: `/api/screenshot`; reached from the report augmentation tool as the fallback for unsupported URLs.
 
 ## Cloudflare R2 (S3-compatible)
 
 - **Purpose**: Optional screenshot storage and public URL generation.
 - **Used by**:
-  - `/api/screenshot` when `storage_provider=cloudflare`
+  - `/api/screenshot` when `storage_provider=cloudflare` — including the report augmentation tool's screenshot fallback
   - `/api/tiktok/profiles` in screenshot-thumbnail mode (calls `/api/screenshot?meta=1&storage_provider=cloudflare`)
 
 ## Oxylabs Proxy
 
 - **Purpose**: Route requests through a proxy to reduce blocking.
 - **Used by**:
-  - TikTok endpoints (metrics/ytdlp)
+  - TikTok endpoints (`/api/tiktok/video/metrics`, `/api/tiktok/ytdlp`, and `/api/tiktok/tagged-music` when `provider=oxylabs`)
   - Instagram scraping endpoint
   - Screenshot endpoint
 - **Configured via env**: `OXYLABS_PROXY_SERVER`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`.
@@ -1512,7 +1565,7 @@ without re-uploading the CSV.
 ## yt-dlp / yt-dlp-wrap
 
 - **Purpose**: Extract TikTok metadata via `yt-dlp`.
-- **Used by**: `/api/tiktok/ytdlp`.
+- **Used by**: `/api/tiktok/ytdlp`; reached from the report augmentation tool for TikTok rows.
 
 ## Serper.dev
 

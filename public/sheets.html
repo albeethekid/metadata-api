@@ -512,6 +512,11 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
       const totalTasks = tasks.length;
       const dupeRows   = totalRows - totalTasks;
 
+      // Each row's pre-fetch snapshot of its mapped columns, so the write
+      // step can skip cells that are already populated instead of
+      // overwriting them with a fresh fetch.
+      const existingByRow = new Map(preflight.rows.map(r => [r.rowIndex, r.existing || null]));
+
       let idx = 0;
       let tasksDone = 0;
       let rowsOk = 0, rowsFailed = 0, rowsAuthorizedOnly = 0;
@@ -577,7 +582,7 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
             rowsOk += n;
             // Fan out: write the same normalized payload to every duplicate row.
             for (const rowIndex of out.rowIndexes) {
-              writeBuffer.push({ rowIndex, normalized: out.normalized });
+              writeBuffer.push({ rowIndex, normalized: out.normalized, existing: existingByRow.get(rowIndex) });
             }
           } else {
             rowsFailed += n;

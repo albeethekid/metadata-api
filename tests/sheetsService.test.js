@@ -14,7 +14,7 @@ describe('buildRowUpdates', () => {
     client_category_override: 7
   };
 
-  test('writes all COLUMN_MAP columns present in headerIndex, blank if empty', () => {
+  test('writes non-empty COLUMN_MAP columns present in headerIndex, skips empty ones (never blanks existing cells)', () => {
     const normalized = {
       title: 'A title', heroImageUrl: '', channelHandle: 'shakira',
       durationSeconds: '', viewCount: 100, publishedAt: '', likeCount: '', commentCount: '', taggedMusic: ''
@@ -24,6 +24,10 @@ describe('buildRowUpdates', () => {
     expect(byRange['report!E5']).toBe('A title');       // title -> col index 4 -> E
     expect(byRange['report!AQ5']).toBe('shakira');       // handle -> col index 42 -> AQ
     expect(byRange['report!AS5']).toBe('100');           // view_count -> col index 44 -> AS
+    // heroImageUrl came back empty on this fetch — content_url must be left
+    // untouched, not overwritten with a blank.
+    expect(byRange['report!K5']).toBeUndefined();        // content_url -> col index 10 -> K
+    expect(updates.length).toBe(3);
   });
 
   test('client_category_override is written when set', () => {
@@ -53,5 +57,24 @@ describe('buildRowUpdates', () => {
     const normalized = { title: 'Only title header exists' };
     const updates = buildRowUpdates(2, partialHeaderIndex, normalized);
     expect(updates).toEqual([{ range: 'report!A2', values: [['Only title header exists']] }]);
+  });
+
+  test('a column already populated in the sheet is never overwritten, even with a fresh non-empty value', () => {
+    const normalized = { title: 'Fresh title from this fetch', heroImageUrl: 'https://new-thumb.example', channelHandle: 'shakira' };
+    const existing = { title: 'Manually-entered title', content_url: '' , handle: ''};
+    const updates = buildRowUpdates(5, headerIndex, normalized, existing);
+    const byRange = Object.fromEntries(updates.map(u => [u.range, u.values[0][0]]));
+    // title already populated -> left alone
+    expect(byRange['report!E5']).toBeUndefined();
+    // content_url and handle were blank in the sheet -> filled in
+    expect(byRange['report!K5']).toBe('https://new-thumb.example');
+    expect(byRange['report!AQ5']).toBe('shakira');
+  });
+
+  test('client_category_override is not overwritten if the sheet already has a value there', () => {
+    const normalized = { clientCategoryOverride: 'source_authorized' };
+    const existing = { client_category_override: 'manual_review' };
+    const updates = buildRowUpdates(5, headerIndex, normalized, existing);
+    expect(updates.find(u => u.range === 'report!H5')).toBeUndefined();
   });
 });
