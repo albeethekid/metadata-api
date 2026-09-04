@@ -108,6 +108,7 @@ Compact payload including:
 - `engagement.likeRate`, `engagement.commentRate`
 - `heroImageUrl`
 - `channelHandle`
+- `description`, `tags` (array) — free on the same `videos.list` call; not otherwise surfaced elsewhere in this API
 
 ### Upstream calls
 
@@ -221,7 +222,13 @@ Only videos with `score > 0` are returned, sorted by score descending.
       "url": "https://www.youtube.com/watch?v=...",
       "thumbnailUrl": "...",
       "score": 87,
-      "scoreReasons": ["exact query match in title", "chapter pattern match"]
+      "scoreReasons": ["exact query match in title", "chapter pattern match"],
+      "channelHandle": "@...",
+      "durationSeconds": 612,
+      "viewCount": 4021,
+      "likeCount": 88,
+      "commentCount": 3,
+      "tags": ["...", "..."]
     }
   ]
 }
@@ -236,16 +243,47 @@ built on cheap 1-unit calls to avoid the expensive `search.list` cost.
 |---|---|---|---|
 | `youtube.channels.list` (`src/youtubeClient.js#getChannelContentDetails`) | `snippet, contentDetails` | 1 | Uses `forHandle` when `channelId` starts with `@`, otherwise `id`. Returns the channel's `contentDetails.relatedPlaylists.uploads` playlist ID. |
 | `youtube.playlistItems.list` (`#getPlaylistItemsAll`, paginated) | `snippet` | 1 per page | Fetches up to 50 items per page. For `maxResults=100` that's 2 pages = **2 units**; `maxResults=300` = 6 pages = **6 units**. |
+| `youtube.videos.list` (`#getVideosDetails`, batched) | `snippet, statistics, contentDetails` | 1 per 50 IDs | Runs once, **after** scoring/filtering — only for videos that made the cut (`score >= minScore`), not every candidate scanned. Populates `channelHandle`/`durationSeconds`/`viewCount`/`likeCount`/`commentCount`/`tags` on each match. `channelHandle` itself costs no extra call — every match is already known to belong to the one channel looked up in step 1, so it's read from that response and copied onto every match rather than looked up per video. If this call fails, matches are still returned (scoring already happened) with those five fields `null`. |
 
-**Typical quota cost**: **3 units** for the default `maxResults=100` scan (1 for channels.list + 2 for two pages of playlistItems.list). Compare with `/api/search?channelId=...` which would cost 100 units for the same scan.
+**Typical quota cost**: **4 units** for the default `maxResults=100` scan with a handful of matches (1 channels.list + 2 pages of playlistItems.list + 1 videos.list batch). Compare with `/api/search?channelId=...` which would cost 100 units for the same scan.
 
-**No calls to** `videos.list` — scoring is performed entirely against the snippet/thumbnails data returned by `playlistItems.list`, which is sufficient for the title/description overlap heuristics.
+Scoring itself still runs entirely against the snippet/thumbnails data returned by `playlistItems.list` — the `videos.list` batch call only enriches the matches that already passed the score threshold, it doesn't affect scoring.
 
 ### Errors
 
 - `400` if `channelId` or `query` is missing
 - `404` if channel not found
 - `502` if uploads playlist cannot be determined
+
+### `GET /discover-siblings.html` (bulk CSV UI)
+
+A client-side-only front end over this endpoint — it never touches a live Sheet, it operates on an uploaded SERP/report CSV and downloads a new CSV with sibling rows appended. Not wired into the Report Augmentation tool (`/sheets.html`); the two are independent.
+
+**Columns it reads from the uploaded CSV:**
+
+| Column | Used as | Notes |
+|---|---|---|
+| `handle` | `channelId` | Preferred source. Must look like `@handle` or a `UC…` (20+ char) channel ID, or the row is skipped. |
+| `likeness_match` | `channelId` (fallback) | Only checked if `handle` is absent/invalid — older CSVs used this column name before it was renamed to `handle`. |
+| `client_category_override` | `query` | Repurposed as the search string passed to the scoring heuristics. This is **not** that column's usual meaning elsewhere (source-authorization override) — a sheet that uses `client_category_override` for its intended purpose will produce meaningless/empty queries here. |
+| `title` | `sourceTitle` | Passed straight through for the title-overlap scoring boost. |
+
+**Not populated by the UI**: `sourceDescription` is a real query param and scoring dimension on the API (+10 for description keyword overlap), but the UI has no column mapped to it — that signal is always dormant when driven through this page.
+
+Rows are grouped by unique `(channelId, query)` pairs before calling the API, so a CSV with many rows on the same channel/query only costs one API call, not one per row.
+
+**Columns it writes on appended sibling rows** (in addition to `title`/`page_url`/`content_url`), only when the uploaded CSV already has that header — same header names and source fields as the Report Augmentation `COLUMN_MAP` (`src/sheetsService.js`), so a report-schema CSV round-trips cleanly:
+
+| Column | From match field |
+|---|---|
+| `handle` | `channelHandle` |
+| `duration` | `durationSeconds` |
+| `view_count` | `viewCount` |
+| `published_date` | `publishedAt` |
+| `like_count` | `likeCount` |
+| `comment_count` | `commentCount` |
+| `description` | `description` |
+| `tags` | `tags` (array joined with `", "`) |
 
 ---
 
@@ -1044,6 +1082,7 @@ This repo serves a set of static HTML pages from `public/` that call the API rou
 | Page | Tool |
 |---|---|
 | `/sheets.html` | Vermillio Report Augmentation (Google Sheets) |
+| `/ai-metadata-augmentation.html` | Vermillio AI Metadata Augmentation — Report Augmentation + YouTube tags/description + ScrapingBee "Made with AI" check |
 | `/csv.html` | CSV Generator (paste-URL batch processor) |
 | `/channels.html` | Channel / profile search across platforms |
 | `/discover-siblings.html` | Sibling discovery from a SERP CSV |
@@ -1200,6 +1239,41 @@ The UI surfaces backend error codes verbatim. Common ones:
 | `MISSING_ANTHROPIC_KEY` | LLM panel was used but the server has no `ANTHROPIC_API_KEY` |
 | `ANTHROPIC_ERROR` | Upstream Anthropic API error (forwarded verbatim) |
 | `YOUTUBE_QUOTA_EXHAUSTED` | All configured YouTube API keys hit their daily quota; affects rows whose `page_url` is YouTube |
+
+---
+
+## AI Metadata Augmentation UI: `GET /ai-metadata-augmentation.html`
+
+Source: `public/ai-metadata-augmentation.html` · Backend module: `src/aiMetadataSheets.js` (on top of `src/sheetsService.js`)
+
+A copy of the Report Augmentation tool above — same `report` tab / `page_url` convention, same three-phase Validate → Process → Ask workflow, same fill-blanks-only semantics — extended with three additional fields normal Report Augmentation doesn't write:
+
+| Sheet header | Source | Notes |
+|---|---|---|
+| `tags` | YouTube `snippet.tags`, joined `"a, b, c"` | YouTube URLs only. **Column is created** (appended at the end of row 1) on Validate if it doesn't already exist. |
+| `description` | YouTube `snippet.description` | YouTube URLs only. **Column is created** the same way as `tags`. |
+| `made_with_ai` | ScrapingBee check of the watch page for YouTube's "How this was made" disclosure panel (`src/youtubeAiLabel.js`) | YouTube URLs only. `TRUE` or `FALSE`. **Not** auto-created — expected to already exist in the sheet; if it's missing it's skipped like any other unmapped header, same as the base tool. If the ScrapingBee check itself fails (network/upstream error), the cell is left untouched rather than written as a guessed `FALSE`. |
+
+The full column set is `AI_METADATA_COLUMN_MAP` in `src/aiMetadataSheets.js` — the base `COLUMN_MAP` from `src/sheetsService.js` plus these three. `readReportTab`, `buildRowUpdates`, `getExistingMappedValues`, and `writeRowsBatch` in `sheetsService.js` all take an optional trailing `columnMap` parameter (defaulting to the base `COLUMN_MAP`) specifically so this tool could reuse the same Sheets I/O rather than duplicating it — only the column set and the per-row fetch (`aiMetadataSheets.js#fetchRowNormalized`, which wraps `urlProcessor.processUrl` and adds the ScrapingBee check) differ.
+
+### Backend endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/ai-metadata-sheets/preflight` | Same as `/api/sheets/preflight`, using the extended column map. Also runs `ensureColumns` for `tags`/`description` and returns the (possibly updated) `headers`/`headerIndex` plus a `columnsAdded` list. |
+| `POST /api/ai-metadata-sheets/fetch-row` | Same as `/api/sheets/fetch-row`, but the normalized result also carries `tags`/`description` (YouTube) and `madeWithAi` (YouTube, when the ScrapingBee check succeeds). |
+| `POST /api/ai-metadata-sheets/write-rows` | Same as `/api/sheets/write-rows`, writing the extended column map. |
+| `POST /api/sheets/ask` | Reused as-is — the LLM Q&A endpoint is sheet/tab-name generic, not tied to any column map, so there's no dedicated copy. |
+
+### Upstream calls
+
+Same as Report Augmentation (`/api/video/:videoId`, `/api/tiktok/ytdlp`, `/api/instagram/video/apify`, etc. via `urlProcessor.js`), plus, for every YouTube row whose base fetch succeeded:
+
+- **ScrapingBee HTML API** — `GET https://app.scrapingbee.com/api/v1/?url=<YOUTUBE_URL>&render_js=false`. The disclosure panel is server-rendered into the watch page's `ytInitialData` JSON, so a non-JS-rendered fetch is sufficient (cheaper than the default `render_js=true`). Auth: `SCRAPINGBEE_API_KEY`. Detection is a substring check for `"howThisWasMadeSectionViewModel"` in the returned HTML.
+
+### Errors
+
+Same codes as Report Augmentation (see above).
 
 ---
 

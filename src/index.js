@@ -8,9 +8,10 @@ const { fetchTaggedMusic, TikTokTaggedMusicError } = require('./tiktokTaggedMusi
 const { fetchTaggedMusic: fetchInstagramTaggedMusic, InstagramTaggedMusicError } = require('./instagramTaggedMusic');
 const { parseTaggedMusic: parseInstagramTaggedMusic } = require('./instagramMetadataParser');
 const { scrapeInstagramPost } = require('./instagramScraper');
-const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch, writeCellsByHeader } = require('./sheetsService');
+const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch, writeCellsByHeader, ensureColumns } = require('./sheetsService');
 const { processUrl } = require('./urlProcessor');
 const { isSourceAuthorized } = require('./sourceAuthorization');
+const { AI_METADATA_COLUMN_MAP, AUTO_CREATE_COLUMNS, fetchRowNormalized } = require('./aiMetadataSheets');
 const enrichmentCsv = require('./enrichmentCsv');
 const enrichmentStore = require('./enrichmentStore');
 const enrichmentWorker = require('./enrichmentWorker');
@@ -192,7 +193,9 @@ app.get('/api/video/:videoId', async (req, res) => {
         commentRate: calculateRate(parseInt(videoDetails.statistics?.commentCount), parseInt(videoDetails.statistics?.viewCount))
       },
       heroImageUrl: getHeroImageUrl(videoDetails.snippet?.thumbnails),
-      channelHandle: videoDetails.channel?.handle || null
+      channelHandle: videoDetails.channel?.handle || null,
+      description: videoDetails.snippet?.description || null,
+      tags: videoDetails.snippet?.tags || null
     };
     
     res.json(compact);
@@ -407,6 +410,31 @@ app.get('/api/youtube/discover-siblings', async (req, res) => {
     }
 
     matches.sort((a, b) => b.score - a.score);
+
+    // 4. Batch-fetch normalized metadata (duration/views/likes/comments/tags)
+    // for the matches that actually survived scoring — not every candidate
+    // scanned. One videos.list call per 50 IDs, vs. one getVideoDetails()
+    // (2 calls each) per match; also skips the redundant per-video channel
+    // lookup since every match is already known to be on this channel.
+    if (matches.length > 0) {
+      const channelHandle = channelData.snippet?.handle || channelData.snippet?.customUrl || null;
+      let detailsById = new Map();
+      try {
+        const details = await youtubeClient.getVideosDetails(matches.map(m => m.videoId));
+        detailsById = new Map(details.map(d => [d.id, d]));
+      } catch (detailsError) {
+        console.warn('discover-siblings: batch video-details fetch failed, matches will lack metadata:', detailsError.message);
+      }
+      for (const m of matches) {
+        const d = detailsById.get(m.videoId);
+        m.channelHandle = channelHandle;
+        m.durationSeconds = d ? parseDurationToSeconds(d.contentDetails?.duration) : null;
+        m.viewCount = d ? (parseInt(d.statistics?.viewCount) || null) : null;
+        m.likeCount = d ? (parseInt(d.statistics?.likeCount) || null) : null;
+        m.commentCount = d ? (parseInt(d.statistics?.commentCount) || null) : null;
+        m.tags = d && Array.isArray(d.snippet?.tags) ? d.snippet.tags : null;
+      }
+    }
 
     return res.json({
       platform: 'youtube',
@@ -623,6 +651,92 @@ app.post('/api/sheets/write-rows', async (req, res) => {
   }
   try {
     const result = await writeRowsBatch(spreadsheetId, headerIndex, rows, overrideRows);
+    return res.json(result);
+  } catch (e) {
+    return res.status(e.status || 500).json({
+      error: e.code || 'WRITE_FAILED',
+      message: e.message
+    });
+  }
+});
+
+// ── AI Metadata Augmentation (public/ai-metadata-augmentation.html) ────────
+// A copy of the three endpoints above, using aiMetadataSheets' extended
+// column map (base fields + tags/description/made_with_ai) instead of the
+// plain COLUMN_MAP. /api/sheets/ask is reused as-is for the LLM panel — it's
+// already sheet/tab-name generic, not tied to any column map.
+
+// POST { sheetUrl } → same shape as /api/sheets/preflight, plus
+//   `columnsAdded` (tags/description created on the sheet if missing).
+app.post('/api/ai-metadata-sheets/preflight', async (req, res) => {
+  const sheetUrl = req.body && req.body.sheetUrl;
+  if (!sheetUrl) {
+    return res.status(400).json({ error: 'MISSING_SHEET_URL', message: 'Field "sheetUrl" is required.' });
+  }
+  const spreadsheetId = extractSpreadsheetId(sheetUrl);
+  if (!spreadsheetId) {
+    return res.status(400).json({
+      error: 'INVALID_SHEET_URL',
+      message: 'Could not extract a spreadsheetId from this URL. Expected a https://docs.google.com/spreadsheets/d/<id>/... URL.'
+    });
+  }
+  try {
+    const result = await readReportTab(spreadsheetId, AI_METADATA_COLUMN_MAP);
+    const { headers, headerIndex, added } = await ensureColumns(
+      spreadsheetId, result.headers, result.headerIndex, AUTO_CREATE_COLUMNS
+    );
+    return res.json({ ...result, headers, headerIndex, columnsAdded: added });
+  } catch (e) {
+    return res.status(e.status || 500).json({
+      error: e.code || 'PREFLIGHT_FAILED',
+      message: e.message
+    });
+  }
+});
+
+// POST { pageUrl, rowIndex?, includeScreenshots? } → same shape as
+// /api/sheets/fetch-row, but `normalized` also carries tags/description
+// (YouTube) and madeWithAi (YouTube only, via ScrapingBee — omitted rather
+// than guessed if that check fails).
+app.post('/api/ai-metadata-sheets/fetch-row', async (req, res) => {
+  const { pageUrl, rowIndex, includeScreenshots } = req.body || {};
+  if (!pageUrl) {
+    return res.status(400).json({ error: 'MISSING_FIELDS', message: 'pageUrl is required.' });
+  }
+  const result = await fetchRowNormalized(pageUrl, {
+    includeScreenshots: includeScreenshots !== false
+  });
+  const authorized = await isSourceAuthorized({
+    platform: result.platform,
+    channelHandle: result.normalized.channelHandle,
+    pageUrl
+  });
+  if (authorized) result.normalized.clientCategoryOverride = 'source_authorized';
+  return res.json({
+    ok: result.ok,
+    rowIndex: rowIndex || null,
+    platform: result.platform,
+    normalized: result.normalized,
+    error: result.ok ? null : result.error,
+    message: result.ok ? null : result.message
+  });
+});
+
+// POST { spreadsheetId, headerIndex, rows, overrideRows? } → same shape as
+// /api/sheets/write-rows, writing the extended column map.
+app.post('/api/ai-metadata-sheets/write-rows', async (req, res) => {
+  const { spreadsheetId, headerIndex, rows, overrideRows } = req.body || {};
+  if (!spreadsheetId || !headerIndex || !Array.isArray(rows)) {
+    return res.status(400).json({
+      error: 'MISSING_FIELDS',
+      message: 'spreadsheetId, headerIndex and rows[] are required.'
+    });
+  }
+  if (rows.length === 0 && (!Array.isArray(overrideRows) || overrideRows.length === 0)) {
+    return res.json({ updated: 0, rows: 0 });
+  }
+  try {
+    const result = await writeRowsBatch(spreadsheetId, headerIndex, rows, overrideRows, AI_METADATA_COLUMN_MAP);
     return res.json(result);
   } catch (e) {
     return res.status(e.status || 500).json({
@@ -2878,6 +2992,7 @@ const indexData = {
   uiTools: [
     { path: '/csv.html',                name: 'CSV Generator',       desc: 'Batch process URLs and download CSV' },
     { path: '/sheets.html',             name: 'Vermillio Report Augmentation', desc: 'Process URLs from a Google Sheet `report` tab and write metadata back' },
+    { path: '/ai-metadata-augmentation.html', name: 'Vermillio AI Metadata Augmentation', desc: 'Same as Report Augmentation, plus YouTube tags/description (new columns) and a ScrapingBee "Made with AI" check written to `made_with_ai`' },
     { path: '/enrichment.html',         name: 'Artist Record Enrichment', desc: 'Upload a CSV keyed on Title Override; SERP + Claude resolve identity, official socials, produced works and affiliations. Generic/ambiguous names are flagged for review.' },
     { path: '/channels.html',           name: 'Channel Search',      desc: 'YouTube channel search CSV export' },
     { path: '/screenshot.html',         name: 'Screenshot Tool',     desc: 'Take screenshots and get public URLs or download CSV' },

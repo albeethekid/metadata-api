@@ -113,7 +113,7 @@ function wrapApiError(e, fallbackStatus = 500) {
  *   TAB_EMPTY             → 400
  *   COLUMN_NOT_FOUND      → 400
  */
-async function readReportTab(spreadsheetId) {
+async function readReportTab(spreadsheetId, columnMap = COLUMN_MAP) {
   const sheets = await getSheetsClient();
 
   let meta;
@@ -179,7 +179,7 @@ async function readReportTab(spreadsheetId) {
   // Mapped columns actually present in this sheet — used to snapshot each
   // row's current values so the write step can skip cells that are already
   // populated instead of overwriting them with a fresh fetch.
-  const mappedCols = COLUMN_MAP.map(([sheetCol]) => sheetCol).filter(c => c in headerIndex);
+  const mappedCols = columnMap.map(([sheetCol]) => sheetCol).filter(c => c in headerIndex);
   const rows = [];
   let skippedFiltered = 0;
   for (let i = 1; i < values.length; i++) {
@@ -270,10 +270,10 @@ async function readTabAsText(spreadsheetId, tabName, opts = {}) {
  */
 const CLIENT_CATEGORY_OVERRIDE_HEADER = 'client_category_override';
 
-function buildRowUpdates(rowIndex, headerIndex, normalized, existing) {
+function buildRowUpdates(rowIndex, headerIndex, normalized, existing, columnMap = COLUMN_MAP) {
   if (!normalized) return [];
   const data = [];
-  for (const [sheetCol, normKey] of COLUMN_MAP) {
+  for (const [sheetCol, normKey] of columnMap) {
     if (!(sheetCol in headerIndex)) continue;
     if (existing && existing[sheetCol]) continue; // already populated — never overwrite
     const v = normalized[normKey];
@@ -299,7 +299,7 @@ function buildRowUpdates(rowIndex, headerIndex, normalized, existing) {
  * in the Sheet, so a caller can pass it to buildRowUpdates and avoid
  * overwriting cells that are already populated.
  */
-async function getExistingMappedValues(spreadsheetId, rowIndex, headerIndex) {
+async function getExistingMappedValues(spreadsheetId, rowIndex, headerIndex, columnMap = COLUMN_MAP) {
   const sheets = await getSheetsClient();
   let resp;
   try {
@@ -312,7 +312,7 @@ async function getExistingMappedValues(spreadsheetId, rowIndex, headerIndex) {
   }
   const rowVals = (resp.data.values && resp.data.values[0]) || [];
   const existing = {};
-  for (const [sheetCol] of COLUMN_MAP) {
+  for (const [sheetCol] of columnMap) {
     if (!(sheetCol in headerIndex)) continue;
     existing[sheetCol] = String(rowVals[headerIndex[sheetCol]] || '').trim();
   }
@@ -369,7 +369,7 @@ async function writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, normal
 // e.g. { rowIndex, clientCategoryOverride: 'source_authorized' }. These get
 // a surgical single-column write, merged into the same batchUpdate call, so
 // nothing else on that row is touched.
-async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs, overrideRows) {
+async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs, overrideRows, columnMap = COLUMN_MAP) {
   const rows = Array.isArray(rowOutputs) ? rowOutputs : [];
   const overrides = Array.isArray(overrideRows) ? overrideRows : [];
   if (rows.length === 0 && overrides.length === 0) {
@@ -377,7 +377,7 @@ async function writeRowsBatch(spreadsheetId, headerIndex, rowOutputs, overrideRo
   }
   const data = [];
   for (const r of rows) {
-    const updates = buildRowUpdates(r.rowIndex, headerIndex, r.normalized, r.existing);
+    const updates = buildRowUpdates(r.rowIndex, headerIndex, r.normalized, r.existing, columnMap);
     for (const u of updates) data.push(u);
   }
   for (const o of overrides) {
@@ -448,10 +448,48 @@ async function writeCellsByHeader(spreadsheetId, headerIndex, edits) {
   return { updated: data.length, skipped };
 }
 
+/**
+ * Add any of `columnNames` that isn't already in `headerIndex` as a new
+ * column at the end of the `report` tab's header row (row 1) — Sheets API
+ * auto-expands the grid when a write lands beyond its current bounds, so no
+ * separate resize call is needed. Idempotent: names already present are
+ * left untouched (and their existing position kept), so it's safe to call
+ * on every run.
+ *
+ * @returns {Promise<{headers:string[], headerIndex:Object<string,number>, added:string[]}>}
+ *   Updated headers/headerIndex reflecting the new columns — pass these on
+ *   to buildRowUpdates/writeRowsBatch instead of the pre-call values.
+ */
+async function ensureColumns(spreadsheetId, headers, headerIndex, columnNames) {
+  const toAdd = (columnNames || []).filter(c => !(c in headerIndex));
+  if (toAdd.length === 0) return { headers: headers.slice(), headerIndex: { ...headerIndex }, added: [] };
+
+  const newHeaders = headers.slice();
+  const newHeaderIndex = { ...headerIndex };
+  const data = [];
+  for (const name of toAdd) {
+    const colIdx = newHeaders.length; // 0-based, next open column
+    data.push({ range: `${TAB_NAME}!${colLetter(colIdx)}1`, values: [[name]] });
+    newHeaderIndex[name] = colIdx;
+    newHeaders.push(name);
+  }
+  const sheets = await getSheetsClient();
+  try {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: { valueInputOption: 'RAW', data }
+    });
+  } catch (e) {
+    throw wrapApiError(e, 502);
+  }
+  return { headers: newHeaders, headerIndex: newHeaderIndex, added: toAdd };
+}
+
 module.exports = {
   TAB_NAME,
   PAGE_URL_HEADER,
   COLUMN_MAP,
+  CLIENT_CATEGORY_OVERRIDE_HEADER,
   extractSpreadsheetId,
   readReportTab,
   readTabAsText,
@@ -459,5 +497,9 @@ module.exports = {
   writeRowsBatch,
   writeCellsByHeader,
   buildRowUpdates,
+  getExistingMappedValues,
+  ensureColumns,
+  colLetter,
+  wrapApiError,
   getSheetsClient
 };

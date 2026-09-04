@@ -277,8 +277,18 @@ function emptyNormalized() {
     channelHandle: '',
     links: '',
     taggedMusic: '',
-    clientCategoryOverride: ''
+    clientCategoryOverride: '',
+    // YouTube-only (the Data API has no equivalent for other platforms here).
+    description: '',
+    tags: ''
   };
+}
+
+// "a, b, c" from a tags array — same delimiter convention as
+// enrichmentCsv.joinList / formatTaggedMusic.
+function joinTags(tags) {
+  if (!Array.isArray(tags)) return '';
+  return tags.filter(t => t != null && String(t).trim() !== '').map(t => String(t).trim()).join(', ');
 }
 
 // Formats a tagged_music object ({ artist, song_title, ... }) as "Artist -
@@ -353,6 +363,12 @@ function normalizeResponse(entry, item) {
   out.engagement_commentRate   = item.engagement_commentRate ?? engagement.commentRate ?? '';
   out.heroImageUrl             = item.heroImageUrl ?? '';
   out.channelHandle            = item.channelHandle ?? '';
+  // YouTube only — /api/video/:id is the only one of this branch's two
+  // callers (youtube, spotify) that returns these.
+  if (platform === 'youtube') {
+    out.description = item.description ?? '';
+    out.tags = Array.isArray(item.tags) ? joinTags(item.tags) : '';
+  }
   return out;
 }
 
