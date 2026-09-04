@@ -328,6 +328,32 @@ class YouTubeClient {
     }
   }
 
+  // Batch video lookup — up to 50 IDs per call (YouTube's `videos.list` max),
+  // chunked transparently for larger lists. Returns raw API item objects
+  // (snippet incl. tags/description, statistics, contentDetails) keyed by
+  // nothing in particular — callers should index by `item.id`. Used where
+  // per-video getVideoDetails() calls would be wasteful (e.g. scoring many
+  // sibling candidates that all belong to one already-known channel).
+  async getVideosDetails(videoIds) {
+    const ids = [...new Set((videoIds || []).filter(Boolean))];
+    if (ids.length === 0) return [];
+    const items = [];
+    for (let i = 0; i < ids.length; i += 50) {
+      const chunk = ids.slice(i, i + 50);
+      try {
+        const response = await this._call(yt => yt.videos.list({
+          part: 'snippet,statistics,contentDetails',
+          id: chunk.join(',')
+        }));
+        items.push(...(response.data.items || []));
+      } catch (error) {
+        console.error('Error getting batch video details:', error.message);
+        throw error;
+      }
+    }
+    return items;
+  }
+
   async getPlaylistItemsAll(playlistId, maxResults = 100) {
     const items = [];
     let pageToken = undefined;

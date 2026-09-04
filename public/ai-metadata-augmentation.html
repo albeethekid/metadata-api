@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/favicon-512.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-  <title>Vermillio Report Augmentation</title>
+  <title>Vermillio AI Metadata Augmentation</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.5; color: #222; max-width: 980px; }
     h1 { margin-bottom: 8px; }
@@ -42,13 +42,13 @@
   </style>
 </head>
 <body>
-  <h1>Vermillio Report Augmentation</h1>
+  <h1>Vermillio AI Metadata Augmentation</h1>
   <p class="muted">
-    Process a Google Sheet's <code>report</code> tab. Reads URLs from the
-    <code>page_url</code> column and writes normalized metadata back into the same row.
-    Uses the same backend endpoints as the
-    <a href="/csv.html">CSV Generator</a>. Need YouTube tags/description and a
-    "Made with AI" check too? See <a href="/ai-metadata-augmentation.html">AI Metadata Augmentation</a>.
+    A copy of <a href="/sheets.html">Vermillio Report Augmentation</a> that additionally fetches YouTube
+    <code>tags</code> and <code>description</code> (new columns, created at the end of the sheet if missing) and
+    checks each YouTube row with ScrapingBee for the "How this was made" / "Made with AI" disclosure label,
+    written into an existing <code>made_with_ai</code> column (TRUE/FALSE). Everything else — the base fields,
+    fill-blanks-only behavior, row skipping, source authorization — works exactly like the Report Augmentation tool.
   </p>
 
   <details class="panel" open>
@@ -66,8 +66,18 @@ view_count     ← viewCount
 published_date ← publishedAt
 like_count     ← likeCount
 comment_count  ← commentCount
-tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Title", blank otherwise)</pre>
-    <p class="muted">Headers missing from your Sheet are skipped silently. Only <code>page_url</code> is required. Rows where <code>final_relevance</code> is FALSE or <code>final_authorized</code> is TRUE are <strong>skipped</strong> (already triaged). Rows whose URL can't be processed are <strong>skipped entirely</strong> — nothing is written and existing cell content is preserved.</p>
+tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Title", blank otherwise)
+tags           ← tags            (YouTube only, "tag one, tag two, ..." — column created if missing)
+description    ← description     (YouTube only — column created if missing)
+made_with_ai   ← ScrapingBee "How this was made" check (YouTube only, TRUE/FALSE — column must already exist)</pre>
+    <p class="muted">
+      <code>tags</code> and <code>description</code> are created automatically at the end of the sheet on
+      Validate if they don't already exist. <code>made_with_ai</code> is <strong>not</strong> auto-created — it's
+      expected to already be a column in your sheet; if it's missing it's skipped like any other unmapped header.
+      A <code>made_with_ai</code> check that fails (network/upstream error) leaves the cell untouched rather than
+      guessing FALSE.
+    </p>
+    <p class="muted">Headers missing from your Sheet (other than the two auto-created above) are skipped silently. Only <code>page_url</code> is required. Rows where <code>final_relevance</code> is FALSE or <code>final_authorized</code> is TRUE are <strong>skipped</strong> (already triaged). Rows whose URL can't be processed are <strong>skipped entirely</strong> — nothing is written and existing cell content is preserved.</p>
     <p class="muted"><code>client_category_override</code> is written with <code>source_authorized</code> when the row's handle or page_url's domain matches an entry in the team's source-authorization reference sheet — it's <strong>never blanked</strong> otherwise, since this column may also hold unrelated manual overrides.</p>
   </details>
 
@@ -136,6 +146,7 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
 
   <script>
     const API_BASE = '';
+    const API_PREFIX = '/api/ai-metadata-sheets';  // preflight / fetch-row / write-rows only — /ask stays on /api/sheets
     const FETCH_CONCURRENCY  = 25;  // parallel URL fetches
     const WRITE_BATCH_SIZE   = 25;  // rows per Sheets API call
 
@@ -158,7 +169,7 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
     const llmResponse         = document.getElementById('llm-response');
     const llmMeta             = document.getElementById('llm-meta');
 
-    let preflight = null; // { spreadsheetId, headers, headerIndex, rows }
+    let preflight = null; // { spreadsheetId, headers, headerIndex, rows, columnsAdded }
 
     function setOverall(text, cls) {
       overallStatus.textContent = text;
@@ -217,7 +228,7 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
     }
 
     function renderPreflightSummary(pf) {
-      const knownHeaders = ['title','content_url','handle','duration','view_count','published_date','like_count','comment_count','tagged_music','client_category_override'];
+      const knownHeaders = ['title','content_url','handle','duration','view_count','published_date','like_count','comment_count','tagged_music','tags','description','made_with_ai','client_category_override'];
       const present = knownHeaders.filter(h => h in pf.headerIndex);
       const missing = knownHeaders.filter(h => !(h in pf.headerIndex));
       const tasks = buildUniqueTasks(pf.rows);
@@ -225,6 +236,9 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
       preflightSummary.style.display = 'block';
       preflightSummary.innerHTML =
         `<div><strong>Spreadsheet:</strong> <code>${pf.spreadsheetId}</code></div>` +
+        (Array.isArray(pf.columnsAdded) && pf.columnsAdded.length
+          ? `<div class="ok"><strong>Columns created:</strong> ${pf.columnsAdded.join(', ')}</div>`
+          : '') +
         (pf.skippedFiltered
           ? `<div class="muted"><strong>Rows skipped (final_relevance=FALSE or final_authorized=TRUE):</strong> ${pf.skippedFiltered}</div>`
           : '') +
@@ -284,7 +298,7 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
 
       let res, body;
       try {
-        res = await fetch(`${API_BASE}/api/sheets/preflight`, {
+        res = await fetch(`${API_BASE}${API_PREFIX}/preflight`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sheetUrl })
@@ -330,6 +344,8 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
       const includeTabs = selectedExtraTabs();
       let res, body;
       try {
+        // The LLM Q&A endpoint is sheet/tab-name generic — no need for a
+        // dedicated copy, so this reuses /api/sheets/ask directly.
         res = await fetch(`${API_BASE}/api/sheets/ask`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -397,7 +413,7 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
     async function fetchUniqueTask(task, includeScreenshots) {
       for (const r of task.rowIndexes) updateRowStatus(r, 'running');
       try {
-        const res = await fetch(`${API_BASE}/api/sheets/fetch-row`, {
+        const res = await fetch(`${API_BASE}${API_PREFIX}/fetch-row`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -442,7 +458,7 @@ tagged_music   ← taggedMusic     (TikTok + Instagram only, "Artist - Song Titl
     async function flushWriteChunk(chunk, overrideChunk) {
       overrideChunk = overrideChunk || [];
       try {
-        const res = await fetch(`${API_BASE}/api/sheets/write-rows`, {
+        const res = await fetch(`${API_BASE}${API_PREFIX}/write-rows`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

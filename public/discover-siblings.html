@@ -35,6 +35,10 @@
     <code>handle</code> (falls back to legacy <code>likeness_match</code>) and a title in
     <code>client_category_override</code>,
     the endpoint scans the channel for related videos and appends them as new rows.
+    Appended rows also get normalized metadata (<code>handle</code>, <code>duration</code>,
+    <code>view_count</code>, <code>published_date</code>, <code>like_count</code>,
+    <code>comment_count</code>, <code>description</code>, <code>tags</code>) filled in wherever
+    your CSV already has that column.
   </p>
 
   <div class="row">
@@ -273,6 +277,19 @@
           newRow.title       = match.title        || '';
           newRow.page_url    = match.url          || '';
           newRow.content_url = match.thumbnailUrl || '';
+
+          // Normalized metadata the sibling-discovery endpoint now returns
+          // per match (batch-fetched from the YouTube Data API) — same
+          // header names as the Report Augmentation tools, filled only
+          // where the target header actually exists in this CSV.
+          if ('handle' in newRow)         newRow.handle         = match.channelHandle  || '';
+          if ('duration' in newRow)       newRow.duration       = match.durationSeconds ?? '';
+          if ('view_count' in newRow)     newRow.view_count     = match.viewCount       ?? '';
+          if ('published_date' in newRow) newRow.published_date = match.publishedAt     || '';
+          if ('like_count' in newRow)     newRow.like_count     = match.likeCount       ?? '';
+          if ('comment_count' in newRow)  newRow.comment_count  = match.commentCount    ?? '';
+          if ('description' in newRow)    newRow.description    = match.description     || '';
+          if ('tags' in newRow)           newRow.tags           = Array.isArray(match.tags) ? match.tags.join(', ') : '';
 
           outputRows.push(newRow);
           siblingsFound++;

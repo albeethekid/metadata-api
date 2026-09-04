@@ -48,6 +48,8 @@ async function fetchWithTimeout(url, opts, timeoutMs) {
  * @param {string} targetUrl  The page to scrape.
  * @param {object} [opts]
  * @param {number} [opts.timeoutMs]  Request timeout, default 20000.
+ * @param {object} [opts.params]    Extra ScrapingBee query params to pass
+ *   through verbatim (e.g. { render_js: 'false', premium_proxy: 'true' }).
  * @returns {Promise<{ html: string, status: number }>}
  */
 async function fetchHtml(targetUrl, opts = {}) {
@@ -56,6 +58,11 @@ async function fetchHtml(targetUrl, opts = {}) {
 
   const requestUrl = new URL(SCRAPINGBEE_ENDPOINT);
   requestUrl.searchParams.set('url', targetUrl);
+  if (opts.params && typeof opts.params === 'object') {
+    for (const [k, v] of Object.entries(opts.params)) {
+      if (v !== undefined && v !== null) requestUrl.searchParams.set(k, String(v));
+    }
+  }
 
   let response;
   try {
