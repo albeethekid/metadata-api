@@ -450,11 +450,15 @@ async function writeCellsByHeader(spreadsheetId, headerIndex, edits) {
 
 /**
  * Add any of `columnNames` that isn't already in `headerIndex` as a new
- * column at the end of the `report` tab's header row (row 1) — Sheets API
- * auto-expands the grid when a write lands beyond its current bounds, so no
- * separate resize call is needed. Idempotent: names already present are
- * left untouched (and their existing position kept), so it's safe to call
- * on every run.
+ * column at the end of the `report` tab's header row (row 1). Idempotent:
+ * names already present are left untouched (and their existing position
+ * kept), so it's safe to call on every run.
+ *
+ * Google Sheets does NOT auto-expand a sheet's grid when a values write
+ * lands beyond its current `gridProperties.columnCount` — it errors with
+ * "Range exceeds grid limits" instead. So when the new columns would land
+ * past the tab's current bounds, this grows the grid first via
+ * `updateSheetProperties`, then writes the header names.
  *
  * @returns {Promise<{headers:string[], headerIndex:Object<string,number>, added:string[]}>}
  *   Updated headers/headerIndex reflecting the new columns — pass these on
@@ -473,8 +477,34 @@ async function ensureColumns(spreadsheetId, headers, headerIndex, columnNames) {
     newHeaderIndex[name] = colIdx;
     newHeaders.push(name);
   }
+
   const sheets = await getSheetsClient();
+  const neededColumnCount = newHeaders.length;
+
   try {
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.properties(sheetId,title,gridProperties(columnCount))'
+    });
+    const reportSheet = (meta.data.sheets || []).find(s => s.properties && s.properties.title === TAB_NAME);
+    const currentColumnCount = (reportSheet && reportSheet.properties.gridProperties && reportSheet.properties.gridProperties.columnCount) || 0;
+    if (reportSheet && neededColumnCount > currentColumnCount) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{
+            updateSheetProperties: {
+              properties: {
+                sheetId: reportSheet.properties.sheetId,
+                gridProperties: { columnCount: neededColumnCount }
+              },
+              fields: 'gridProperties.columnCount'
+            }
+          }]
+        }
+      });
+    }
+
     await sheets.spreadsheets.values.batchUpdate({
       spreadsheetId,
       requestBody: { valueInputOption: 'RAW', data }
