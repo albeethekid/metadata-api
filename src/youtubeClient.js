@@ -1,5 +1,6 @@
 const { google } = require('googleapis');
 require('dotenv').config();
+const usageTracker = require('./youtubeUsageTracker');
 
 // Daily-quota errors from googleapis surface as 403 with one of these reasons.
 const QUOTA_REASONS = new Set(['quotaExceeded', 'dailyLimitExceeded']);
@@ -51,6 +52,11 @@ function loadKeys() {
   return single ? [single] : [];
 }
 
+// Channel handles change essentially never — safe to cache well past a
+// single request's lifetime. channelId -> { handle, expiresAtMs }.
+const CHANNEL_HANDLE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const channelHandleCache = new Map();
+
 class YouTubeClient {
   constructor() {
     const keys = loadKeys();
@@ -91,7 +97,12 @@ class YouTubeClient {
   // Run `fn(youtubeClient)` against the current key. On quotaExceeded /
   // dailyLimitExceeded, mark the key exhausted until the next PT midnight,
   // rotate to the next key, and retry. Up to one attempt per key per call.
-  async _call(fn) {
+  //
+  // `meta.method` (e.g. 'videos.list') and `meta.sheetUrl` (the Google Sheet
+  // driving this call, if any) are only used for usage tracking — a
+  // successful call is recorded against them; a failed one costs no quota
+  // and is not recorded (see youtubeUsageTracker.js).
+  async _call(fn, meta = {}) {
     if (this.clients.length === 0) {
       const e = new Error('YOUTUBE_API_KEY (or YOUTUBE_API_KEYS) is not configured.');
       e.code = 'YOUTUBE_NOT_CONFIGURED';
@@ -107,7 +118,11 @@ class YouTubeClient {
       }
       tried.add(i);
       try {
-        return await fn(this.clients[i].youtube);
+        const result = await fn(this.clients[i].youtube);
+        if (meta.method) {
+          usageTracker.recordCall({ method: meta.method, sheetUrl: meta.sheetUrl, keyIndex: i });
+        }
+        return result;
       } catch (error) {
         if (!isQuotaError(error)) throw error;
         const resetMs = msUntilNextPacificMidnight();
@@ -127,7 +142,7 @@ class YouTubeClient {
     throw e;
   }
 
-  async searchVideos(query, maxResults = 10) {
+  async searchVideos(query, maxResults = 10, opts = {}) {
     try {
       const response = await this._call(yt => yt.search.list({
         part: 'snippet',
@@ -135,7 +150,7 @@ class YouTubeClient {
         type: 'video',
         maxResults: maxResults,
         order: 'relevance'
-      }));
+      }), { method: 'search.list', sheetUrl: opts.sheetUrl });
       return response.data.items;
     } catch (error) {
       console.error('Error searching videos:', error.message);
@@ -143,7 +158,7 @@ class YouTubeClient {
     }
   }
 
-  async searchChannels(query, maxResults = 10) {
+  async searchChannels(query, maxResults = 10, opts = {}) {
     try {
       const response = await this._call(yt => yt.search.list({
         part: 'snippet',
@@ -151,7 +166,7 @@ class YouTubeClient {
         type: 'channel',
         maxResults: maxResults,
         order: 'relevance'
-      }));
+      }), { method: 'search.list', sheetUrl: opts.sheetUrl });
 
       const channels = response.data.items;
 
@@ -162,7 +177,7 @@ class YouTubeClient {
         const statsResponse = await this._call(yt => yt.channels.list({
           part: 'statistics,snippet',
           id: channelIds
-        }));
+        }), { method: 'channels.list', sheetUrl: opts.sheetUrl });
 
         // Map statistics and handle back to channels
         const statsMap = {};
@@ -191,43 +206,44 @@ class YouTubeClient {
     }
   }
 
-  async getVideoDetails(videoId) {
+  async getVideoDetails(videoId, opts = {}) {
     try {
       const response = await this._call(yt => yt.videos.list({
         part: 'snippet,statistics,contentDetails',
         id: videoId
-      }));
+      }), { method: 'videos.list', sheetUrl: opts.sheetUrl });
 
       const video = response.data.items[0];
       if (!video) return video;
 
-      // Add channel handle information
+      // Add channel handle information — cached, since a channel's handle
+      // essentially never changes and the same channel frequently recurs
+      // across rows in one report (e.g. a handful of repost channels
+      // accounting for most of a batch). Cache hits cost zero quota.
       if (video.snippet && video.snippet.channelId) {
-        try {
-          const channelResponse = await this._call(yt => yt.channels.list({
-            part: 'snippet',
-            id: video.snippet.channelId
-          }));
+        const channelId = video.snippet.channelId;
+        const cached = channelHandleCache.get(channelId);
+        if (cached && cached.expiresAtMs > Date.now()) {
+          video.channel = { id: channelId, title: video.snippet.channelTitle, handle: cached.handle };
+        } else {
+          try {
+            const channelResponse = await this._call(yt => yt.channels.list({
+              part: 'snippet',
+              id: channelId
+            }), { method: 'channels.list', sheetUrl: opts.sheetUrl });
 
-          const channel = channelResponse.data.items[0];
-          if (channel && channel.snippet) {
-            const handle = channel.snippet.handle || channel.snippet.customUrl || null;
+            const channel = channelResponse.data.items[0];
+            const handle = (channel && channel.snippet)
+              ? (channel.snippet.handle || channel.snippet.customUrl || null)
+              : null;
+            channelHandleCache.set(channelId, { handle, expiresAtMs: Date.now() + CHANNEL_HANDLE_CACHE_TTL_MS });
 
-            // Augment response with channel information
-            video.channel = {
-              id: video.snippet.channelId,
-              title: video.snippet.channelTitle,
-              handle: handle
-            };
+            video.channel = { id: channelId, title: video.snippet.channelTitle, handle };
+          } catch (channelError) {
+            // Fail gracefully - channel lookup errors don't fail the main request
+            console.warn('Channel lookup failed:', channelError.message);
+            video.channel = { id: channelId, title: video.snippet.channelTitle, handle: null };
           }
-        } catch (channelError) {
-          // Fail gracefully - channel lookup errors don't fail the main request
-          console.warn('Channel lookup failed:', channelError.message);
-          video.channel = {
-            id: video.snippet.channelId,
-            title: video.snippet.channelTitle,
-            handle: null
-          };
         }
       }
 
@@ -238,7 +254,7 @@ class YouTubeClient {
     }
   }
 
-  async getChannelVideos(channelId, maxResults = 10) {
+  async getChannelVideos(channelId, maxResults = 10, opts = {}) {
     try {
       const response = await this._call(yt => yt.search.list({
         part: 'snippet',
@@ -246,7 +262,7 @@ class YouTubeClient {
         type: 'video',
         maxResults: maxResults,
         order: 'date'
-      }));
+      }), { method: 'search.list', sheetUrl: opts.sheetUrl });
       return response.data.items;
     } catch (error) {
       console.error('Error getting channel videos:', error.message);
@@ -254,14 +270,14 @@ class YouTubeClient {
     }
   }
 
-  async getTrendingVideos(regionCode = 'US', maxResults = 10) {
+  async getTrendingVideos(regionCode = 'US', maxResults = 10, opts = {}) {
     try {
       const response = await this._call(yt => yt.videos.list({
         part: 'snippet,statistics',
         chart: 'mostPopular',
         regionCode: regionCode,
         maxResults: maxResults
-      }));
+      }), { method: 'videos.list', sheetUrl: opts.sheetUrl });
       return response.data.items;
     } catch (error) {
       console.error('Error getting trending videos:', error.message);
@@ -269,14 +285,14 @@ class YouTubeClient {
     }
   }
 
-  async getVideoComments(videoId, maxResults = 20) {
+  async getVideoComments(videoId, maxResults = 20, opts = {}) {
     try {
       const response = await this._call(yt => yt.commentThreads.list({
         part: 'snippet',
         videoId: videoId,
         maxResults: maxResults,
         order: 'relevance'
-      }));
+      }), { method: 'commentThreads.list', sheetUrl: opts.sheetUrl });
       return response.data.items;
     } catch (error) {
       console.error('Error getting video comments:', error.message);
@@ -284,12 +300,12 @@ class YouTubeClient {
     }
   }
 
-  async getChannelDetails(channelId) {
+  async getChannelDetails(channelId, opts = {}) {
     try {
       const response = await this._call(yt => yt.channels.list({
         part: 'snippet,statistics,brandingSettings',
         id: channelId
-      }));
+      }), { method: 'channels.list', sheetUrl: opts.sheetUrl });
       return response.data.items[0];
     } catch (error) {
       console.error('Error getting channel details:', error.message);
@@ -297,13 +313,13 @@ class YouTubeClient {
     }
   }
 
-  async getPlaylistItems(playlistId, maxResults = 50) {
+  async getPlaylistItems(playlistId, maxResults = 50, opts = {}) {
     try {
       const response = await this._call(yt => yt.playlistItems.list({
         part: 'snippet',
         playlistId: playlistId,
         maxResults: maxResults
-      }));
+      }), { method: 'playlistItems.list', sheetUrl: opts.sheetUrl });
       return response.data.items;
     } catch (error) {
       console.error('Error getting playlist items:', error.message);
@@ -311,7 +327,7 @@ class YouTubeClient {
     }
   }
 
-  async getChannelContentDetails(channelId) {
+  async getChannelContentDetails(channelId, opts = {}) {
     try {
       const isHandle = channelId.startsWith('@');
       const params = { part: 'snippet,contentDetails' };
@@ -320,7 +336,7 @@ class YouTubeClient {
       } else {
         params.id = channelId;
       }
-      const response = await this._call(yt => yt.channels.list(params));
+      const response = await this._call(yt => yt.channels.list(params), { method: 'channels.list', sheetUrl: opts.sheetUrl });
       return response.data.items[0] || null;
     } catch (error) {
       console.error('Error getting channel content details:', error.message);
@@ -334,7 +350,7 @@ class YouTubeClient {
   // nothing in particular — callers should index by `item.id`. Used where
   // per-video getVideoDetails() calls would be wasteful (e.g. scoring many
   // sibling candidates that all belong to one already-known channel).
-  async getVideosDetails(videoIds) {
+  async getVideosDetails(videoIds, opts = {}) {
     const ids = [...new Set((videoIds || []).filter(Boolean))];
     if (ids.length === 0) return [];
     const items = [];
@@ -344,7 +360,7 @@ class YouTubeClient {
         const response = await this._call(yt => yt.videos.list({
           part: 'snippet,statistics,contentDetails',
           id: chunk.join(',')
-        }));
+        }), { method: 'videos.list', sheetUrl: opts.sheetUrl });
         items.push(...(response.data.items || []));
       } catch (error) {
         console.error('Error getting batch video details:', error.message);
@@ -354,7 +370,7 @@ class YouTubeClient {
     return items;
   }
 
-  async getPlaylistItemsAll(playlistId, maxResults = 100) {
+  async getPlaylistItemsAll(playlistId, maxResults = 100, opts = {}) {
     const items = [];
     let pageToken = undefined;
     const perPage = 50;
@@ -368,7 +384,7 @@ class YouTubeClient {
       };
       if (pageToken) params.pageToken = pageToken;
 
-      const response = await this._call(yt => yt.playlistItems.list(params));
+      const response = await this._call(yt => yt.playlistItems.list(params), { method: 'playlistItems.list', sheetUrl: opts.sheetUrl });
       const batch = response.data.items || [];
       items.push(...batch);
       pageToken = response.data.nextPageToken;

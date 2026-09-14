@@ -228,11 +228,14 @@ Only videos with `score > 0` are returned, sorted by score descending.
       "viewCount": 4021,
       "likeCount": 88,
       "commentCount": 3,
-      "tags": ["...", "..."]
+      "tags": ["...", "..."],
+      "madeWithAi": "TRUE"
     }
   ]
 }
 ```
+
+`madeWithAi` is `'TRUE'`/`'FALSE'`/`null` (check failed or inconclusive — never a guessed false) — the same "How this was made" disclosure-label check the Vermillio AI Metadata Augmentation tool writes to `made_with_ai` (see `src/youtubeAiLabel.js`). Checked for matches only, same gating as the `tags`/duration/etc. enrichment below.
 
 ### Upstream calls
 
@@ -248,6 +251,10 @@ built on cheap 1-unit calls to avoid the expensive `search.list` cost.
 **Typical quota cost**: **4 units** for the default `maxResults=100` scan with a handful of matches (1 channels.list + 2 pages of playlistItems.list + 1 videos.list batch). Compare with `/api/search?channelId=...` which would cost 100 units for the same scan.
 
 Scoring itself still runs entirely against the snippet/thumbnails data returned by `playlistItems.list` — the `videos.list` batch call only enriches the matches that already passed the score threshold, it doesn't affect scoring.
+
+**ScrapingBee** (`src/youtubeAiLabel.js#checkMadeWithAi`) — one page fetch per match (not per candidate scanned), same gating as the `videos.list` enrichment above. `render_js=false`; the disclosure label is server-rendered into `ytInitialData`, so a plain fetch is enough. This is a real per-page cost separate from YouTube quota — a channel scan with many matches costs that many ScrapingBee credits, run at concurrency 5.
+
+**Usage tracking**: every successful `channels.list`/`playlistItems.list`/`videos.list` call here is recorded in `src/youtubeUsageTracker.js`, viewable via `GET /api/youtube-usage` (see below). Since this endpoint has no Google Sheet driving it, its calls are tracked under the `"(no sheet — direct/API call)"` bucket rather than a sheet URL.
 
 ### Errors
 
@@ -1573,6 +1580,11 @@ without re-uploading the CSV.
 
 - **Purpose**: YouTube video/channel search, metadata, playlists, comments, trending.
 - **Used by**: `YouTubeClient`; reached from the report augmentation tool via `/api/video/:videoId`.
+- **Quota**: 10,000 units/day per key by default (Google Cloud Console default; not raised here). `YOUTUBE_API_KEYS` (comma-separated) rotates across multiple keys when one is exhausted — `src/youtubeClient.js#loadKeys`. Costs: `search.list` = 100 units/call, everything else (`videos.list`, `channels.list`, `playlistItems.list`, `commentThreads.list`) = 1 unit/call regardless of `part`s or how many comma-separated IDs are batched in (up to 50).
+- **Usage tracking**: every successful call (failures cost no quota, so they aren't counted) is recorded in `src/youtubeUsageTracker.js`, broken down by the Google Sheet URL that triggered it (when there is one) and by call type. In-memory only — resets on redeploy/restart, so treat it as a live diagnostic view, not a durable audit log.
+  - `GET /api/youtube-usage?date=YYYY-MM-DD` (date optional, defaults to today in `America/Los_Angeles` — the same boundary the quota itself resets on) → `{ date, grandTotalUnits, grandTotalCalls, bySheet: [{ sheetUrl, totalUnits, totalCalls, byMethod: [{method, calls, units}] }] }`, sorted by `totalUnits` descending.
+  - Calls with no sheet driving them (e.g. `/api/youtube/discover-siblings`, or any direct `/api/video/:videoId` call without a `sheetUrl` query param) are grouped under the sheet key `"(no sheet — direct/API call)"`.
+  - `sheetUrl` is threaded through from the client: both `public/sheets.html` and `public/ai-metadata-augmentation.html` send the pasted sheet URL in every `fetch-row` request body; the server forwards it through `urlProcessor.js#processUrl` → `fetchForEntry` → `/api/video/:videoId?sheetUrl=...` → `youtubeClient.getVideoDetails(id, {sheetUrl})` → the tracker. A row fetch for a non-YouTube URL never reaches YouTube quota at all, so it's simply never recorded — no special-casing needed.
 
 ## Google Sheets API v4
 

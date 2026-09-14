@@ -201,11 +201,14 @@ function classifyUrl(rawUrl, includeScreenshots = true) {
 
 // ---------- HTTP self-call to the platform endpoints ----------
 
-async function fetchForEntry(entry, baseUrl) {
+async function fetchForEntry(entry, baseUrl, opts = {}) {
   const enc = encodeURIComponent;
   let url;
   if (entry.platform === 'youtube') {
     url = `${baseUrl}/api/video/${enc(entry.id)}`;
+    // sheetUrl is forwarded for YouTube-quota usage tracking only (see
+    // youtubeUsageTracker.js) — no other platform's fetch here hits that quota.
+    if (opts.sheetUrl) url += `?sheetUrl=${enc(opts.sheetUrl)}`;
   } else if (entry.platform === 'tiktok') {
     url = `${baseUrl}/api/tiktok/ytdlp?url=${enc(entry.url)}`;
   } else if (entry.platform === 'instagram') {
@@ -405,7 +408,7 @@ async function processUrl(rawUrl, opts = {}) {
   let data;
   try {
     const [primary, taggedMusic] = await Promise.all([
-      fetchForEntry(entry, baseUrl),
+      fetchForEntry(entry, baseUrl, opts),
       entry.platform === 'tiktok' ? fetchTikTokTaggedMusic(entry, baseUrl) : Promise.resolve(null)
     ]);
     data = primary;
@@ -436,9 +439,68 @@ async function processUrl(rawUrl, opts = {}) {
   return { ok: true, platform: entry.platform, normalized };
 }
 
+// Rough pre-run cost estimate for a batch of page URLs (a report's page_url
+// column), shown at preflight time so a run's YouTube-quota cost is known
+// before it starts, not discovered after hitting a wall (see the 2026-09-14
+// incident). Dedupes URLs first since the tools only fetch each unique URL
+// once, fanning the result out to every row that shares it.
+//
+// Only YouTube rows cost YouTube quota; every other platform hits a
+// different upstream entirely. Each YouTube row costs `videos.list` (1
+// unit) always, plus `channels.list` (1 unit) UNLESS that video's channel
+// handle is already cached from an earlier row in the same run (see
+// youtubeClient.js's channelHandleCache) — which can't be known in advance
+// without making the calls, so this reports a worst-case ceiling alongside
+// a best-case floor (one channels.list per *distinct* channel is unknowable
+// pre-fetch, so the floor conservatively assumes every row is a fresh
+// channel too; actual usage on a real report is typically well below the
+// ceiling whenever channels repeat, which they often do).
+//
+// `rows` are readReportTab's row objects ({pageUrl, alreadyComplete, ...}),
+// not bare URL strings — rows already flagged `alreadyComplete` (fully
+// populated metadata, OR already known source_authorized — see
+// sheetsService.js) are excluded up front, since the actual run will skip
+// them too (buildUniqueTasks does the same filter client-side). Without
+// this, the estimate would overstate cost on any sheet with rows already
+// processed by an earlier run.
+function estimateYoutubeUsage(rows) {
+  const pending = (rows || []).filter(r => r && !r.alreadyComplete);
+  const skipped = (rows || []).length - pending.length;
+  const unique = [...new Set(pending.map(r => String(r.pageUrl || '').trim()).filter(Boolean))];
+  let youtubeRows = 0;
+  for (const url of unique) {
+    const entry = classifyUrl(url, false);
+    if (entry && entry.platform === 'youtube') youtubeRows++;
+  }
+  const skippedNote = skipped > 0
+    ? ` (${skipped} row${skipped === 1 ? '' : 's'} already complete/authorized — excluded, no quota needed)`
+    : '';
+  // Rows counted as "pending" here still cost quota even if the fetch ends
+  // up revealing they're source_authorized — for YouTube, authorization can
+  // only be determined by the same fetch that costs the quota (the handle
+  // it needs isn't derivable from the URL up front), so there's no cheap way
+  // to identify and exclude future-authorized rows ahead of time the way
+  // already-authorized ones are excluded above.
+  const authorizedCaveat = youtubeRows > 0
+    ? ' This includes rows that will likely turn out to be source_authorized — that still requires a fetch to determine, so it still counts toward the total below even though no further review is needed once flagged.'
+    : '';
+  return {
+    uniqueUrls: unique.length,
+    youtubeRows,
+    nonYoutubeRows: unique.length - youtubeRows,
+    alreadyCompleteRows: skipped,
+    estimatedUnitsCeiling: youtubeRows * 2,   // videos.list + channels.list, no cache hits
+    estimatedUnitsFloor: youtubeRows,         // videos.list only, every channel already cached
+    note: youtubeRows > 0
+      ? `${youtubeRows} unique YouTube URL(s) → ${youtubeRows}-${youtubeRows * 2} quota units depending on channel repeats (10,000 units/day/key default).${skippedNote}${authorizedCaveat}`
+      : `No YouTube URLs need fetching in this sheet — this run will not consume YouTube quota.${skippedNote}`
+  };
+}
+
 module.exports = {
   processUrl,
   classifyUrl,
+  estimateYoutubeUsage,
   normalizeResponse,
   emptyNormalized,
   formatTaggedMusic,

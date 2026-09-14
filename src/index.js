@@ -8,10 +8,12 @@ const { fetchTaggedMusic, TikTokTaggedMusicError } = require('./tiktokTaggedMusi
 const { fetchTaggedMusic: fetchInstagramTaggedMusic, InstagramTaggedMusicError } = require('./instagramTaggedMusic');
 const { parseTaggedMusic: parseInstagramTaggedMusic } = require('./instagramMetadataParser');
 const { scrapeInstagramPost } = require('./instagramScraper');
-const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch, writeCellsByHeader, ensureColumns } = require('./sheetsService');
-const { processUrl } = require('./urlProcessor');
+const { extractSpreadsheetId, readReportTab, readTabAsText, writeRowMappedValues, writeRowsBatch, writeCellsByHeader, ensureColumns, SOURCE_AUTHORIZED_VALUE } = require('./sheetsService');
+const { processUrl, estimateYoutubeUsage } = require('./urlProcessor');
 const { isSourceAuthorized } = require('./sourceAuthorization');
 const { AI_METADATA_COLUMN_MAP, AUTO_CREATE_COLUMNS, fetchRowNormalized } = require('./aiMetadataSheets');
+const { checkMadeWithAi } = require('./youtubeAiLabel');
+const youtubeUsage = require('./youtubeUsageTracker');
 const enrichmentCsv = require('./enrichmentCsv');
 const enrichmentStore = require('./enrichmentStore');
 const enrichmentWorker = require('./enrichmentWorker');
@@ -171,8 +173,9 @@ app.get('/api/video/:videoId', async (req, res) => {
   try {
     const { videoId } = req.params;
     const verbose = req.query.verbose === '1';
-    
-    const videoDetails = await youtubeClient.getVideoDetails(videoId);
+    const sheetUrl = req.query.sheetUrl || null;
+
+    const videoDetails = await youtubeClient.getVideoDetails(videoId, { sheetUrl });
     
     if (verbose) {
       return res.json(videoDetails);
@@ -434,6 +437,24 @@ app.get('/api/youtube/discover-siblings', async (req, res) => {
         m.commentCount = d ? (parseInt(d.statistics?.commentCount) || null) : null;
         m.tags = d && Array.isArray(d.snippet?.tags) ? d.snippet.tags : null;
       }
+
+      // 5. "Made with AI" disclosure check (ScrapingBee) — same signal the
+      // Vermillio AI Metadata Augmentation tool writes for report rows. Only
+      // for matches, not every scanned candidate: each check is a ScrapingBee
+      // page fetch (real cost, not YouTube quota), so it's gated the same way
+      // as the tags/description fetch above. Run with modest concurrency
+      // rather than one at a time or fully parallel.
+      const AI_CHECK_CONCURRENCY = 5;
+      for (let i = 0; i < matches.length; i += AI_CHECK_CONCURRENCY) {
+        const batch = matches.slice(i, i + AI_CHECK_CONCURRENCY);
+        await Promise.all(batch.map(async m => {
+          try {
+            m.madeWithAi = await checkMadeWithAi(m.url);
+          } catch (_) {
+            m.madeWithAi = null;
+          }
+        }));
+      }
     }
 
     return res.json({
@@ -451,9 +472,19 @@ app.get('/api/youtube/discover-siblings', async (req, res) => {
       matches
     });
   } catch (error) {
-    console.error('discover-siblings error:', error);
+    console.error('discover-siblings error:', error.message);
     return res.status(500).json({ error: error.message });
   }
+});
+
+// GET /api/youtube-usage?date=YYYY-MM-DD (optional, defaults to today in
+// America/Los_Angeles — the same boundary the quota itself resets on).
+// Returns YouTube Data API v3 usage broken down by Google Sheet URL, then by
+// call type, from the in-process tracker in youtubeUsageTracker.js. Resets
+// on every deploy/restart — this is a live diagnostic view, not a durable
+// log; for a permanent record, read it periodically and persist elsewhere.
+app.get('/api/youtube-usage', (req, res) => {
+  res.json(youtubeUsage.getSummary(req.query.date));
 });
 
 // Extract a YouTube videoId from common URL shapes:
@@ -586,7 +617,8 @@ app.post('/api/sheets/preflight', async (req, res) => {
   }
   try {
     const result = await readReportTab(spreadsheetId);
-    return res.json(result);
+    const estimatedYoutubeUsage = estimateYoutubeUsage(result.rows);
+    return res.json({ ...result, estimatedYoutubeUsage });
   } catch (e) {
     return res.status(e.status || 500).json({
       error: e.code || 'PREFLIGHT_FAILED',
@@ -605,12 +637,13 @@ app.post('/api/sheets/preflight', async (req, res) => {
 // Always 200 — per-row failures arrive as `ok: false` with `error`/`message`
 // so a batch can keep going.
 app.post('/api/sheets/fetch-row', async (req, res) => {
-  const { pageUrl, rowIndex, includeScreenshots } = req.body || {};
+  const { pageUrl, rowIndex, includeScreenshots, sheetUrl } = req.body || {};
   if (!pageUrl) {
     return res.status(400).json({ error: 'MISSING_FIELDS', message: 'pageUrl is required.' });
   }
   const result = await processUrl(pageUrl, {
-    includeScreenshots: includeScreenshots !== false  // default true
+    includeScreenshots: includeScreenshots !== false,  // default true
+    sheetUrl: sheetUrl || null
   });
   // Runs regardless of ok — the domain check needs only the raw URL, and
   // handle-derivation for tiktok/soundcloud/x/facebook/threads needs no
@@ -621,7 +654,7 @@ app.post('/api/sheets/fetch-row', async (req, res) => {
     channelHandle: result.normalized.channelHandle,
     pageUrl
   });
-  if (authorized) result.normalized.clientCategoryOverride = 'source_authorized';
+  if (authorized) result.normalized.clientCategoryOverride = SOURCE_AUTHORIZED_VALUE;
   return res.json({
     ok: result.ok,
     rowIndex: rowIndex || null,
@@ -685,7 +718,8 @@ app.post('/api/ai-metadata-sheets/preflight', async (req, res) => {
     const { headers, headerIndex, added } = await ensureColumns(
       spreadsheetId, result.headers, result.headerIndex, AUTO_CREATE_COLUMNS
     );
-    return res.json({ ...result, headers, headerIndex, columnsAdded: added });
+    const estimatedYoutubeUsage = estimateYoutubeUsage(result.rows);
+    return res.json({ ...result, headers, headerIndex, columnsAdded: added, estimatedYoutubeUsage });
   } catch (e) {
     return res.status(e.status || 500).json({
       error: e.code || 'PREFLIGHT_FAILED',
@@ -699,19 +733,20 @@ app.post('/api/ai-metadata-sheets/preflight', async (req, res) => {
 // (YouTube) and madeWithAi (YouTube only, via ScrapingBee — omitted rather
 // than guessed if that check fails).
 app.post('/api/ai-metadata-sheets/fetch-row', async (req, res) => {
-  const { pageUrl, rowIndex, includeScreenshots } = req.body || {};
+  const { pageUrl, rowIndex, includeScreenshots, sheetUrl } = req.body || {};
   if (!pageUrl) {
     return res.status(400).json({ error: 'MISSING_FIELDS', message: 'pageUrl is required.' });
   }
   const result = await fetchRowNormalized(pageUrl, {
-    includeScreenshots: includeScreenshots !== false
+    includeScreenshots: includeScreenshots !== false,
+    sheetUrl: sheetUrl || null
   });
   const authorized = await isSourceAuthorized({
     platform: result.platform,
     channelHandle: result.normalized.channelHandle,
     pageUrl
   });
-  if (authorized) result.normalized.clientCategoryOverride = 'source_authorized';
+  if (authorized) result.normalized.clientCategoryOverride = SOURCE_AUTHORIZED_VALUE;
   return res.json({
     ok: result.ok,
     rowIndex: rowIndex || null,
@@ -1032,11 +1067,11 @@ app.post('/api/sheets/process-row', async (req, res) => {
       pageUrl
     });
     if (result.ok) {
-      if (authorized) result.normalized.clientCategoryOverride = 'source_authorized';
+      if (authorized) result.normalized.clientCategoryOverride = SOURCE_AUTHORIZED_VALUE;
       await writeRowMappedValues(spreadsheetId, rowIndex, headerIndex, result.normalized);
     } else if (authorized) {
       await writeCellsByHeader(spreadsheetId, headerIndex, [
-        { rowIndex, header: 'client_category_override', value: 'source_authorized' }
+        { rowIndex, header: 'client_category_override', value: SOURCE_AUTHORIZED_VALUE }
       ]);
     }
   } catch (e) {

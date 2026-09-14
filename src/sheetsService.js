@@ -32,6 +32,12 @@ const COLUMN_MAP = [
   ['tagged_music',   'taggedMusic']
 ];
 
+// Not part of COLUMN_MAP — it's a general override column the source-
+// authorization check (not the platform fetch) writes into, so it's tracked
+// separately wherever a row's "existing" snapshot is built.
+const CLIENT_CATEGORY_OVERRIDE_HEADER = 'client_category_override';
+const SOURCE_AUTHORIZED_VALUE = 'source_authorized';
+
 /**
  * Extract the spreadsheetId from any standard Google Sheets URL.
  * Examples:
@@ -199,10 +205,26 @@ async function readReportTab(spreadsheetId, columnMap = COLUMN_MAP) {
     }
     const existing = {};
     for (const c of mappedCols) existing[c] = String(rowVals[headerIndex[c]] || '').trim();
+    if (CLIENT_CATEGORY_OVERRIDE_HEADER in headerIndex) {
+      existing[CLIENT_CATEGORY_OVERRIDE_HEADER] = String(rowVals[headerIndex[CLIENT_CATEGORY_OVERRIDE_HEADER]] || '').trim();
+    }
+    // A row already known to be source_authorized needs no metadata at all —
+    // that status is the final word for it regardless of whether title/
+    // duration/etc. ever got filled in, so it's checked first and skips
+    // fetching outright. Otherwise, fall back to "every mapped metadata
+    // column already has a value". A blank override cell on its own is NOT
+    // treated as "still needs a fetch" — that's the expected final state for
+    // a row that was checked and found not authorized, not a sign it's
+    // pending. Basing the skip on a blank override would defeat the point
+    // for the common case, where most rows aren't authorized.
+    const alreadyAuthorized = existing[CLIENT_CATEGORY_OVERRIDE_HEADER] === SOURCE_AUTHORIZED_VALUE;
+    const alreadyComplete = alreadyAuthorized ||
+      (mappedCols.length > 0 && mappedCols.every(c => existing[c]));
     rows.push({
       rowIndex: i + 1, // 1-based spreadsheet row number (header is row 1)
       pageUrl,
-      existing
+      existing,
+      alreadyComplete
     });
   }
 
@@ -268,8 +290,6 @@ async function readTabAsText(spreadsheetId, tabName, opts = {}) {
  *   (from readReportTab's per-row snapshot), or null/undefined to skip
  *   this check (e.g. callers that never captured a snapshot).
  */
-const CLIENT_CATEGORY_OVERRIDE_HEADER = 'client_category_override';
-
 function buildRowUpdates(rowIndex, headerIndex, normalized, existing, columnMap = COLUMN_MAP) {
   if (!normalized) return [];
   const data = [];
@@ -520,6 +540,7 @@ module.exports = {
   PAGE_URL_HEADER,
   COLUMN_MAP,
   CLIENT_CATEGORY_OVERRIDE_HEADER,
+  SOURCE_AUTHORIZED_VALUE,
   extractSpreadsheetId,
   readReportTab,
   readTabAsText,
