@@ -181,9 +181,19 @@
 
     // ── Core processing ────────────────────────────────────────────────────────
 
+    // Columns auto-created on the output header row if the input CSV doesn't
+    // already have them — same pattern as AUTO_CREATE_COLUMNS in
+    // aiMetadataSheets.js for the Sheets-based tool. Without this, the
+    // per-match tags/description the API already returns had nowhere to go:
+    // the enrichment code only ever fills a column that already exists, and
+    // most real report templates don't have tags/description headers at all.
+    const AUTO_CREATE_COLUMNS = ['tags', 'description'];
+
     async function processFile(text, minScore, maxResults) {
       const { headers, rows } = parseCsv(text);
       if (!headers.length || !rows.length) throw new Error('Empty or invalid CSV');
+      const columnsAdded = AUTO_CREATE_COLUMNS.filter(c => !headers.includes(c));
+      headers.push(...columnsAdded);
 
       const cache    = new Map();
       const messages = [];
@@ -298,7 +308,7 @@
       }
 
       const channelsQueried = taskKeys.length - apiErrors;
-      return { headers, outputRows, channelsQueried, rowsSkipped, siblingsFound, apiErrors, messages };
+      return { headers, outputRows, channelsQueried, rowsSkipped, siblingsFound, apiErrors, messages, columnsAdded };
     }
 
     // ── Button handler ─────────────────────────────────────────────────────────
@@ -320,7 +330,7 @@
 
       try {
         const text = await file.text();
-        const { headers, outputRows, channelsQueried, rowsSkipped, siblingsFound, apiErrors, messages } =
+        const { headers, outputRows, channelsQueried, rowsSkipped, siblingsFound, apiErrors, messages, columnsAdded } =
           await processFile(text, minScore, maxResults);
 
         // Build output CSV
@@ -342,6 +352,7 @@
           `Done — ${channelsQueried} channels queried, ${siblingsFound} sibling rows added. ` +
           `${outputRows.length} total rows in output.`;
         detailText.textContent = [
+          columnsAdded.length > 0 ? `Columns added: ${columnsAdded.join(', ')}.` : '',
           rowsSkipped  > 0 ? `${rowsSkipped} rows skipped (non-YouTube or missing fields).` : '',
           apiErrors    > 0 ? `${apiErrors} API error(s).` : ''
         ].filter(Boolean).join('  ');
