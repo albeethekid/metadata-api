@@ -37,7 +37,7 @@
     the endpoint scans the channel for related videos and appends them as new rows.
     Appended rows also get normalized metadata (<code>handle</code>, <code>duration</code>,
     <code>view_count</code>, <code>published_date</code>, <code>like_count</code>,
-    <code>comment_count</code>, <code>description</code>, <code>tags</code>) filled in wherever
+    <code>comment_count</code>, <code>description</code>, <code>tags</code>, <code>made_with_ai</code>) filled in wherever
     your CSV already has that column.
   </p>
 
@@ -290,6 +290,7 @@
           if ('comment_count' in newRow)  newRow.comment_count  = match.commentCount    ?? '';
           if ('description' in newRow)    newRow.description    = match.description     || '';
           if ('tags' in newRow)           newRow.tags           = Array.isArray(match.tags) ? match.tags.join(', ') : '';
+          if ('made_with_ai' in newRow)   newRow.made_with_ai   = match.madeWithAi      || '';
 
           outputRows.push(newRow);
           siblingsFound++;
