@@ -24,10 +24,11 @@ Search YouTube videos.
 
 - `q` (required): search query
 - `maxResults` (optional, default `10`): number of results
+- `urlOnly` (optional): set `urlOnly=1` to return a plain array of `https://www.youtube.com/watch?v=<id>` strings instead of the full result objects
 
 ### Behavior
 
-- Returns the raw-ish response from the internal YouTube client.
+- Returns the raw-ish response from the internal YouTube client, or (with `urlOnly=1`) just the video URLs — useful when all you need is a link list to feed into another tool (e.g. a discovery/triage step) without the rest of the snippet payload.
 
 ### Upstream calls
 

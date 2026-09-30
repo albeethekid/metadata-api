@@ -78,7 +78,8 @@ function renderInstagramDebugHtml(payload) {
 app.get('/api/search', async (req, res) => {
   try {
     const { q, maxResults = 10 } = req.query;
-    
+    const urlOnly = req.query.urlOnly === '1';
+
     if (!q) {
       return res.status(400).json({ error: 'Query parameter "q" is required' });
     }
@@ -125,6 +126,11 @@ function renderInstagramDebugHtml(payload) {
 }
     
     const results = await youtubeClient.searchVideos(q, parseInt(maxResults));
+
+    if (urlOnly) {
+      return res.json(results.map(item => `https://www.youtube.com/watch?v=${item.id.videoId}`));
+    }
+
     res.json(results);
   } catch (error) {
     res.status(500).json({ error: error.message });
